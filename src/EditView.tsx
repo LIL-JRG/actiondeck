@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent, type RefObject } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
@@ -12,6 +12,7 @@ import {
   type Codec,
   type Encoder,
   type ExportProgress,
+  type Fit,
   type MediaFile,
   type Settings,
   type TimelineItem,
@@ -26,14 +27,59 @@ type Props = {
   onError: (message: string) => void;
 };
 
-type Draft = { path: string; name: string; info: ClipInfo; inPoint: number; outPoint: number; applyLut: boolean; editingId: string | null };
+type Draft = {
+  path: string;
+  name: string;
+  info: ClipInfo;
+  inPoint: number;
+  outPoint: number;
+  applyLut: boolean;
+  speed: number;
+  volume: number;
+  cropX: number;
+  cropY: number;
+  editingId: string | null;
+};
+
+/** Formato del video final; "source" = el del primer clip. */
+export type FrameFormat = "source" | "16:9" | "9:16" | "1:1" | "4:5";
+
+const FORMATS: { id: FrameFormat; label: string; ratio: number | null }[] = [
+  { id: "source", label: "Original", ratio: null },
+  { id: "16:9", label: "16:9 horizontal", ratio: 16 / 9 },
+  { id: "9:16", label: "9:16 vertical", ratio: 9 / 16 },
+  { id: "1:1", label: "1:1 cuadrado", ratio: 1 },
+  { id: "4:5", label: "4:5 retrato", ratio: 4 / 5 },
+];
+
+const SPEEDS = [0.25, 0.5, 0.75, 1, 1.5, 2, 4];
+
+function clipRatio(info: ClipInfo): number {
+  return info.width / info.height;
+}
+
+/** Duración en el video final, con la velocidad aplicada. */
+function outputDuration(item: { inPoint: number; outPoint: number; speed: number }): number {
+  return (item.outPoint - item.inPoint) / item.speed;
+}
+
+function formatSpeed(speed: number): string {
+  return `${speed}×`;
+}
 
 export function EditView({ settings, library, timeline, setTimeline, onError }: Props) {
   const videos = useMemo(() => library.filter((f) => f.kind === "video"), [library]);
   const [infos, setInfos] = useState<Record<string, ClipInfo | string>>({});
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
   const [draft, setDraft] = useState<Draft | null>(null);
+  // Formato y encuadre son del proyecto: los usa el marco de recorte de cada
+  // clip y la exportación.
+  const [format, setFormat] = useState<FrameFormat>("source");
+  const [fit, setFit] = useState<Fit>("crop");
   const hasLut = settings.lutName !== null;
+
+  const firstInfo = timeline[0]?.info ?? draft?.info;
+  const targetRatio = FORMATS.find((f) => f.id === format)?.ratio ?? (firstInfo ? clipRatio(firstInfo) : null);
 
   // Analiza los clips y genera miniaturas de uno en uno para no saturar el disco.
   useEffect(() => {
@@ -70,28 +116,52 @@ export function EditView({ settings, library, timeline, setTimeline, onError }: 
   const openClip = (file: MediaFile) => {
     const info = infos[file.path];
     if (!info || typeof info === "string") return;
-    setDraft({ path: file.path, name: file.name, info, inPoint: 0, outPoint: info.duration, applyLut: hasLut, editingId: null });
+    setDraft({
+      path: file.path,
+      name: file.name,
+      info,
+      inPoint: 0,
+      outPoint: info.duration,
+      applyLut: hasLut,
+      speed: 1,
+      volume: 1,
+      cropX: 0.5,
+      cropY: 0.5,
+      editingId: null,
+    });
   };
 
-  const editItem = (item: TimelineItem) =>
-    setDraft({ ...item, editingId: item.id });
+  const editItem = (item: TimelineItem) => setDraft({ ...item, editingId: item.id });
+
+  const itemFrom = (d: Draft, id: string): TimelineItem => ({
+    id,
+    path: d.path,
+    name: d.name,
+    inPoint: d.inPoint,
+    outPoint: d.outPoint,
+    applyLut: d.applyLut && hasLut,
+    hasAudio: d.info.hasAudio,
+    speed: d.speed,
+    volume: d.volume,
+    cropX: d.cropX,
+    cropY: d.cropY,
+    info: d.info,
+  });
 
   const commitDraft = () => {
     if (!draft) return;
-    const item: TimelineItem = {
-      id: draft.editingId ?? crypto.randomUUID(),
-      path: draft.path,
-      name: draft.name,
-      inPoint: draft.inPoint,
-      outPoint: draft.outPoint,
-      applyLut: draft.applyLut && hasLut,
-      hasAudio: draft.info.hasAudio,
-      info: draft.info,
-    };
-    setTimeline((prev) =>
-      draft.editingId ? prev.map((t) => (t.id === draft.editingId ? item : t)) : [...prev, item],
-    );
+    const item = itemFrom(draft, draft.editingId ?? crypto.randomUUID());
+    setTimeline((prev) => (draft.editingId ? prev.map((t) => (t.id === draft.editingId ? item : t)) : [...prev, item]));
     setDraft({ ...draft, editingId: item.id });
+  };
+
+  /** Parte el clip de la línea de tiempo en dos en `at`, con sus ajustes actuales. */
+  const splitAt = (at: number) => {
+    if (!draft?.editingId) return;
+    const first = itemFrom({ ...draft, outPoint: at }, draft.editingId);
+    const second = itemFrom({ ...draft, inPoint: at }, crypto.randomUUID());
+    setTimeline((prev) => prev.flatMap((t) => (t.id === draft.editingId ? [first, second] : [t])));
+    setDraft({ ...draft, inPoint: at, editingId: second.id });
   };
 
   return (
@@ -130,27 +200,119 @@ export function EditView({ settings, library, timeline, setTimeline, onError }: 
 
       <section className="panel stage">
         <div className="stage-scroll">
-        {draft ? (
-          <ClipEditor
-            key={draft.path}
-            draft={draft}
-            setDraft={setDraft}
-            hasLut={hasLut}
-            onCommit={commitDraft}
-            onError={onError}
-          />
-        ) : (
-          <div className="empty-stage">
-            <p>Elige un clip de la biblioteca para verlo, recortarlo y agregarlo a la línea de tiempo.</p>
-          </div>
-        )}
+          {draft ? (
+            <ClipEditor
+              key={draft.path}
+              draft={draft}
+              setDraft={setDraft}
+              hasLut={hasLut}
+              cropRatio={fit === "crop" ? targetRatio : null}
+              onCommit={commitDraft}
+              onSplit={splitAt}
+              onError={onError}
+            />
+          ) : (
+            <div className="empty-stage">
+              <p>Elige un clip de la biblioteca para verlo, recortarlo y agregarlo a la línea de tiempo.</p>
+            </div>
+          )}
         </div>
         <Timeline items={timeline} setItems={setTimeline} activeId={draft?.editingId ?? null} onEdit={editItem} />
       </section>
 
       <aside className="panel export">
-        <ExportPanel settings={settings} timeline={timeline} onError={onError} />
+        <ExportPanel
+          settings={settings}
+          timeline={timeline}
+          format={format}
+          setFormat={setFormat}
+          fit={fit}
+          setFit={setFit}
+          onError={onError}
+        />
       </aside>
+    </div>
+  );
+}
+
+/** Tamaño de un elemento, actualizado al cambiar la ventana. */
+function useSize<T extends HTMLElement>(): [RefObject<T | null>, { width: number; height: number }] {
+  const ref = useRef<T>(null);
+  const [size, setSize] = useState({ width: 0, height: 0 });
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const observer = new ResizeObserver(([entry]) =>
+      setSize({ width: entry.contentRect.width, height: entry.contentRect.height }),
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+  return [ref, size];
+}
+
+/**
+ * Marco del formato de salida sobre el video. Lo de fuera se oscurece y se
+ * arrastra desde el asa del centro para elegir qué parte de la imagen queda.
+ */
+function CropFrame({
+  sourceRatio,
+  targetRatio,
+  x,
+  y,
+  onMove,
+}: {
+  sourceRatio: number;
+  targetRatio: number;
+  x: number;
+  y: number;
+  onMove: (x: number, y: number) => void;
+}) {
+  // Fracción del video que ocupa el marco.
+  const w = Math.min(1, targetRatio / sourceRatio);
+  const h = Math.min(1, sourceRatio / targetRatio);
+  const left = (1 - w) * x;
+  const top = (1 - h) * y;
+  const drag = useRef<{ startX: number; startY: number; x: number; y: number; box: DOMRect } | null>(null);
+
+  const onPointerDown = (e: PointerEvent<HTMLButtonElement>) => {
+    const box = e.currentTarget.parentElement?.parentElement?.getBoundingClientRect();
+    if (!box) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    drag.current = { startX: e.clientX, startY: e.clientY, x, y, box };
+  };
+  const onPointerMove = (e: PointerEvent<HTMLButtonElement>) => {
+    const d = drag.current;
+    if (!d) return;
+    const clamp = (v: number) => Math.min(1, Math.max(0, v));
+    const nx = w < 1 ? clamp(d.x + (e.clientX - d.startX) / (d.box.width * (1 - w))) : x;
+    const ny = h < 1 ? clamp(d.y + (e.clientY - d.startY) / (d.box.height * (1 - h))) : y;
+    onMove(nx, ny);
+  };
+  const onPointerUp = () => {
+    drag.current = null;
+  };
+
+  const pct = (v: number) => `${v * 100}%`;
+  return (
+    <div className="crop-overlay">
+      <div className="crop-shade" style={{ left: 0, top: 0, width: pct(left), height: "100%" }} />
+      <div className="crop-shade" style={{ left: pct(left + w), top: 0, right: 0, height: "100%" }} />
+      <div className="crop-shade" style={{ left: pct(left), top: 0, width: pct(w), height: pct(top) }} />
+      <div className="crop-shade" style={{ left: pct(left), top: pct(top + h), width: pct(w), bottom: 0 }} />
+      <div className="crop-box" style={{ left: pct(left), top: pct(top), width: pct(w), height: pct(h) }}>
+        <button
+          className="crop-grip"
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
+          aria-label="Mover el encuadre"
+          title="Arrastra para elegir qué parte de la imagen queda"
+        >
+          Mover
+        </button>
+      </div>
     </div>
   );
 }
@@ -159,13 +321,18 @@ function ClipEditor({
   draft,
   setDraft,
   hasLut,
+  cropRatio,
   onCommit,
+  onSplit,
   onError,
 }: {
   draft: Draft;
   setDraft: (d: Draft) => void;
   hasLut: boolean;
+  /** Formato al que se recorta el video final, o null si no se recorta. */
+  cropRatio: number | null;
   onCommit: () => void;
+  onSplit: (at: number) => void;
   onError: (message: string) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -174,8 +341,8 @@ function ClipEditor({
   const [current, setCurrent] = useState(0);
   const [frames, setFrames] = useState<{ before: string; after: string | null; stamp: number } | null>(null);
   const [comparing, setComparing] = useState(false);
-
   const [forceProxy, setForceProxy] = useState(false);
+  const [playerRef, playerSize] = useSize<HTMLDivElement>();
 
   useEffect(() => {
     let alive = true;
@@ -188,6 +355,17 @@ function ClipEditor({
       alive = false;
     };
   }, [draft.path, forceProxy]);
+
+  // La vista previa reproduce con la velocidad y el volumen elegidos. El
+  // reproductor no sube de 100 %: arriba de eso solo se nota al exportar.
+  const applyPlayback = () => {
+    const v = videoRef.current;
+    if (!v) return;
+    v.playbackRate = draft.speed;
+    v.volume = Math.min(1, draft.volume);
+    v.muted = draft.volume === 0;
+  };
+  useEffect(applyPlayback, [draft.speed, draft.volume, preview]);
 
   // Si el visor no logra reproducir el original (p. ej. un HEVC que este
   // sistema no admite), se pide la copia ligera una sola vez.
@@ -219,6 +397,7 @@ function ClipEditor({
     const v = videoRef.current;
     if (!v) return;
     v.currentTime = draft.inPoint;
+    applyPlayback();
     v.play();
   };
 
@@ -234,8 +413,27 @@ function ClipEditor({
     }
   };
 
+  const sourceRatio = clipRatio(draft.info);
+  // El video ocupa lo más que puede del reproductor sin deformarse.
+  const frameSize = (() => {
+    const { width, height } = playerSize;
+    if (!width || !height) return null;
+    return width / height > sourceRatio
+      ? { width: height * sourceRatio, height }
+      : { width, height: width / sourceRatio };
+  })();
+  const showCrop = cropRatio !== null && Math.abs(cropRatio - sourceRatio) > 0.01;
+
   const inPct = (draft.inPoint / draft.info.duration) * 100;
   const outPct = (draft.outPoint / draft.info.duration) * 100;
+  const length = draft.outPoint - draft.inPoint;
+  const canSplit = draft.editingId !== null && current > draft.inPoint + 0.2 && current < draft.outPoint - 0.2;
+  const slowMotionNote =
+    draft.speed < 1
+      ? draft.info.fps * draft.speed >= 24
+        ? `Cámara lenta fluida: se grabó a ${Math.round(draft.info.fps)} fps.`
+        : `Se verá entrecortado: se grabó a ${Math.round(draft.info.fps)} fps. Para cámara lenta fluida, graba a 100 o 120 fps.`
+      : null;
 
   return (
     <div className="clip-editor">
@@ -247,17 +445,29 @@ function ClipEditor({
         {(!draft.info.browserPlayable || forceProxy) && preview && <span className="badge">Vista previa ligera</span>}
       </header>
 
-      <div className="player">
-        {preview ? (
-          <video
-            ref={videoRef}
-            src={fileUrl(preview)}
-            controls
-            onTimeUpdate={onTime}
-            onSeeked={onTime}
-            onError={onVideoError}
-            preload="auto"
-          />
+      <div className="player" ref={playerRef}>
+        {preview && frameSize ? (
+          <div className="frame" style={{ width: frameSize.width, height: frameSize.height }}>
+            <video
+              ref={videoRef}
+              src={fileUrl(preview)}
+              controls
+              onTimeUpdate={onTime}
+              onSeeked={onTime}
+              onLoadedMetadata={applyPlayback}
+              onError={onVideoError}
+              preload="auto"
+            />
+            {showCrop && (
+              <CropFrame
+                sourceRatio={sourceRatio}
+                targetRatio={cropRatio}
+                x={draft.cropX}
+                y={draft.cropY}
+                onMove={(cropX, cropY) => setDraft({ ...draft, cropX, cropY })}
+              />
+            )}
+          </div>
         ) : (
           <div className="player-placeholder">
             {previewError ?? (draft.info.browserPlayable && !forceProxy ? "Cargando…" : "Preparando vista previa ligera…")}
@@ -265,10 +475,13 @@ function ClipEditor({
         )}
       </div>
 
-      <div className="trim-bar" onClick={(e) => {
-        const rect = e.currentTarget.getBoundingClientRect();
-        seek(((e.clientX - rect.left) / rect.width) * draft.info.duration);
-      }}>
+      <div
+        className="trim-bar"
+        onClick={(e) => {
+          const rect = e.currentTarget.getBoundingClientRect();
+          seek(((e.clientX - rect.left) / rect.width) * draft.info.duration);
+        }}
+      >
         <div className="trim-range" style={{ left: `${inPct}%`, width: `${outPct - inPct}%` }} />
         <div className="trim-head" style={{ left: `${(current / draft.info.duration) * 100}%` }} />
       </div>
@@ -285,8 +498,67 @@ function ClipEditor({
           Fin
           <input type="number" step={0.1} min={0} value={draft.outPoint.toFixed(1)} onChange={(e) => setOut(Number(e.target.value))} />
         </label>
-        <span className="hint">Duración {formatTime(draft.outPoint - draft.inPoint)}</span>
+        <button
+          className="secondary"
+          onClick={() => onSplit(current)}
+          disabled={!canSplit}
+          title={draft.editingId ? "Parte este clip en dos en la posición actual" : "Agrega el clip a la línea de tiempo para poder dividirlo"}
+        >
+          Dividir en {formatTime(current)}
+        </button>
       </div>
+
+      <div className="adjust-grid">
+        <div className="adjust">
+          <span className="adjust-label">Velocidad</span>
+          <div className="segmented" role="group" aria-label="Velocidad">
+            {SPEEDS.map((s) => (
+              <button
+                key={s}
+                className={draft.speed === s ? "active" : ""}
+                aria-pressed={draft.speed === s}
+                onClick={() => setDraft({ ...draft, speed: s })}
+              >
+                {formatSpeed(s)}
+              </button>
+            ))}
+          </div>
+          <span className="hint small">
+            Duración {formatTime(length / draft.speed)}
+            {draft.speed !== 1 && ` (original ${formatTime(length)})`}
+            {slowMotionNote && <> · {slowMotionNote}</>}
+          </span>
+        </div>
+
+        <div className="adjust">
+          <span className="adjust-label">Volumen</span>
+          {draft.info.hasAudio ? (
+            <div className="volume-row">
+              <button className="secondary" onClick={() => setDraft({ ...draft, volume: draft.volume === 0 ? 1 : 0 })}>
+                {draft.volume === 0 ? "Activar sonido" : "Silenciar"}
+              </button>
+              <input
+                type="range"
+                min={0}
+                max={200}
+                step={5}
+                value={Math.round(draft.volume * 100)}
+                onChange={(e) => setDraft({ ...draft, volume: Number(e.target.value) / 100 })}
+                aria-label="Volumen"
+              />
+              <span className="volume-value">{Math.round(draft.volume * 100)} %</span>
+            </div>
+          ) : (
+            <span className="hint small">Este clip no tiene sonido.</span>
+          )}
+        </div>
+      </div>
+
+      {showCrop && (
+        <p className="hint small">
+          El marco muestra lo que queda en el video final; arrástralo desde «Mover» para elegir el encuadre.
+        </p>
+      )}
 
       <div className="color-row">
         <label className={hasLut ? "toggle" : "toggle disabled"} title={hasLut ? "" : "Elige una LUT en Ajustes"}>
@@ -337,7 +609,7 @@ function Timeline({
   activeId: string | null;
   onEdit: (item: TimelineItem) => void;
 }) {
-  const total = items.reduce((sum, i) => sum + (i.outPoint - i.inPoint), 0);
+  const total = items.reduce((sum, i) => sum + outputDuration(i), 0);
   const move = (index: number, delta: number) =>
     setItems((prev) => {
       const next = [...prev];
@@ -364,6 +636,8 @@ function Timeline({
                 <span className="t-name">{i + 1}. {item.name}</span>
                 <span className="t-meta">
                   {formatTime(item.inPoint)}–{formatTime(item.outPoint)}
+                  {item.speed !== 1 && <span className="badge lut">{formatSpeed(item.speed)}</span>}
+                  {item.hasAudio && item.volume === 0 && <span className="badge lut">Sin sonido</span>}
                   {item.applyLut && <span className="badge lut">LUT</span>}
                 </span>
               </button>
@@ -380,23 +654,60 @@ function Timeline({
   );
 }
 
-const RESOLUTIONS = [
-  { label: "4K (3840×2160)", w: 3840, h: 2160 },
-  { label: "2.7K (2688×1512)", w: 2688, h: 1512 },
-  { label: "1440p (2560×1440)", w: 2560, h: 1440 },
-  { label: "1080p (1920×1080)", w: 1920, h: 1080 },
-  { label: "720p (1280×720)", w: 1280, h: 720 },
+/** Lado corto del video final; "max" = lo más que da el clip sin agrandarlo. */
+const SIZES = [
+  { id: "max", label: "Máxima del clip" },
+  { id: "2160", label: "4K" },
+  { id: "1512", label: "2.7K" },
+  { id: "1080", label: "1080p" },
+  { id: "720", label: "720p" },
 ];
 const FRAME_RATES = [24, 25, 30, 48, 50, 60, 100, 120];
 
-function ExportPanel({ settings, timeline, onError }: { settings: Settings; timeline: TimelineItem[]; onError: (m: string) => void }) {
+function even(n: number): number {
+  const r = Math.round(n);
+  return r % 2 === 0 ? r : r - 1;
+}
+
+/** Ancho y alto de salida para un formato, un encuadre y un tamaño. */
+function outputSize(first: ClipInfo, ratio: number, fit: Fit, size: string): { w: number; h: number } {
+  if (size === "max") {
+    const src = clipRatio(first);
+    // Recortar: el mayor rectángulo del formato dentro del clip. Barras: el
+    // menor que contiene al clip completo. En ambos casos un lado mide lo
+    // mismo que el clip; cuál, depende de si el formato es más angosto.
+    const keepsHeight = (fit === "crop") === ratio < src;
+    return keepsHeight
+      ? { w: even(first.height * ratio), h: even(first.height) }
+      : { w: even(first.width), h: even(first.width / ratio) };
+  }
+  const short = Number(size);
+  return ratio >= 1 ? { w: even(short * ratio), h: even(short) } : { w: even(short), h: even(short / ratio) };
+}
+
+function ExportPanel({
+  settings,
+  timeline,
+  format,
+  setFormat,
+  fit,
+  setFit,
+  onError,
+}: {
+  settings: Settings;
+  timeline: TimelineItem[];
+  format: FrameFormat;
+  setFormat: (f: FrameFormat) => void;
+  fit: Fit;
+  setFit: (f: Fit) => void;
+  onError: (m: string) => void;
+}) {
   const first = timeline[0]?.info;
   const [codec, setCodec] = useState<Codec>("hevc");
   const hardware = settings.hardware;
   const [encoder, setEncoder] = useState<Encoder>(hardware?.hevc ? hardware.encoder : "cpu");
   const [quality, setQuality] = useState(20);
-  const [resolution, setResolution] = useState("source");
-  const [vertical, setVertical] = useState(false);
+  const [size, setSize] = useState("max");
   const [fps, setFps] = useState("source");
   const [progress, setProgress] = useState<ExportProgress | null>(null);
   const [exporting, setExporting] = useState(false);
@@ -414,17 +725,21 @@ function ExportPanel({ settings, timeline, onError }: { settings: Settings; time
     if (encoder !== "cpu" && !hardwareOk) setEncoder("cpu");
   }, [encoder, hardwareOk]);
 
-  const size = (() => {
-    if (resolution === "source" || !first) return first ? { w: even(first.width), h: even(first.height) } : null;
-    const preset = RESOLUTIONS.find((r) => r.label === resolution)!;
-    return vertical ? { w: preset.h, h: preset.w } : { w: preset.w, h: preset.h };
-  })();
+  const chooseFormat = (next: FrameFormat) => {
+    setFormat(next);
+    // Para redes sociales, 1080 es lo habitual; en el formato original, lo máximo.
+    setSize(next === "source" ? "max" : "1080");
+  };
+
+  const ratio = FORMATS.find((f) => f.id === format)?.ratio ?? (first ? clipRatio(first) : null);
+  const reframes = !!first && ratio !== null && Math.abs(ratio - clipRatio(first)) > 0.01;
+  const out = first && ratio ? outputSize(first, ratio, reframes ? fit : "crop", size) : null;
   const frameRate = fps === "source" ? (first ? Math.round(first.fps * 1000) / 1000 : 30) : Number(fps);
   const needsLut = timeline.some((t) => t.applyLut);
-  const blocked = timeline.length === 0 || !size || (needsLut && !settings.lutName) || !!settings.ffmpegError;
+  const blocked = timeline.length === 0 || !out || (needsLut && !settings.lutName) || !!settings.ffmpegError;
 
   const run = async () => {
-    if (!size) return;
+    if (!out) return;
     const output = await save({
       title: "Guardar video",
       defaultPath: joinPath(settings.libraryDir, "Exportados", `ActionDeck_${localStamp()}.mp4`),
@@ -435,7 +750,16 @@ function ExportPanel({ settings, timeline, onError }: { settings: Settings; time
     setResult(null);
     setProgress(null);
     try {
-      const path = await api.startExport(timeline, { output, codec, encoder, quality, width: size.w, height: size.h, fps: frameRate });
+      const path = await api.startExport(timeline, {
+        output,
+        codec,
+        encoder,
+        quality,
+        width: out.w,
+        height: out.h,
+        fps: frameRate,
+        fit: reframes ? fit : "crop",
+      });
       setResult(path);
     } catch (e) {
       const message = errorText(e);
@@ -452,7 +776,47 @@ function ExportPanel({ settings, timeline, onError }: { settings: Settings; time
       <h2>Exportar</h2>
 
       <label className="field">
-        Formato
+        Formato del video
+        <select value={format} onChange={(e) => chooseFormat(e.target.value as FrameFormat)} disabled={exporting}>
+          {FORMATS.map((f) => (
+            <option key={f.id} value={f.id}>
+              {f.id === "source" && first ? `Original del primer clip (${first.width}×${first.height})` : f.label}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      {reframes && (
+        <div className="field">
+          Encuadre
+          <div className="segmented" role="group" aria-label="Encuadre">
+            <button className={fit === "crop" ? "active" : ""} aria-pressed={fit === "crop"} onClick={() => setFit("crop")} disabled={exporting}>
+              Recortar
+            </button>
+            <button className={fit === "pad" ? "active" : ""} aria-pressed={fit === "pad"} onClick={() => setFit("pad")} disabled={exporting}>
+              Barras negras
+            </button>
+          </div>
+          <span className="hint small">
+            {fit === "crop" ? "Llena el cuadro; en cada clip eliges qué parte queda." : "Muestra la imagen completa con barras."}
+          </span>
+        </div>
+      )}
+
+      <label className="field">
+        Resolución
+        <select value={size} onChange={(e) => setSize(e.target.value)} disabled={exporting}>
+          {SIZES.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.label}
+              {first && ratio ? ` (${outputSize(first, ratio, reframes ? fit : "crop", s.id).w}×${outputSize(first, ratio, reframes ? fit : "crop", s.id).h})` : ""}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label className="field">
+        Formato de archivo
         <select value={codec} onChange={(e) => setCodec(e.target.value as Codec)} disabled={exporting}>
           <option value="hevc">H.265 (HEVC) 10 bits</option>
           <option value="h264">H.264 8 bits (más compatible)</option>
@@ -475,22 +839,6 @@ function ExportPanel({ settings, timeline, onError }: { settings: Settings; time
         Calidad: {quality} <span className="hint small">(menor = mejor, archivo más grande)</span>
         <input type="range" min={14} max={30} value={quality} onChange={(e) => setQuality(Number(e.target.value))} disabled={exporting} />
       </label>
-
-      <label className="field">
-        Resolución
-        <select value={resolution} onChange={(e) => setResolution(e.target.value)} disabled={exporting}>
-          <option value="source">Igual que el primer clip{first ? ` (${even(first.width)}×${even(first.height)})` : ""}</option>
-          {RESOLUTIONS.map((r) => (
-            <option key={r.label}>{r.label}</option>
-          ))}
-        </select>
-      </label>
-      {resolution !== "source" && (
-        <label className="toggle">
-          <input type="checkbox" checked={vertical} onChange={(e) => setVertical(e.target.checked)} disabled={exporting} />
-          Vertical (9:16)
-        </label>
-      )}
 
       <label className="field">
         Cuadros por segundo
@@ -541,8 +889,4 @@ function localStamp(): string {
   const d = new Date();
   const p = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`;
-}
-
-function even(n: number): number {
-  return n % 2 === 0 ? n : n - 1;
 }

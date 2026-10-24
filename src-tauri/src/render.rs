@@ -13,6 +13,16 @@ use std::sync::Mutex;
 
 use crate::tools::Tools;
 
+fn one() -> f64 {
+    1.0
+}
+
+fn half() -> f64 {
+    0.5
+}
+
+/// Un clip de la línea de tiempo con sus ajustes. Los que faltan toman el
+/// valor neutro, así un proyecto anterior sigue sirviendo.
 #[derive(Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineItem {
@@ -21,6 +31,36 @@ pub struct TimelineItem {
     pub out_point: f64,
     pub apply_lut: bool,
     pub has_audio: bool,
+    /// 1 = normal, 0.25 = cuatro veces más lento, 4 = cuatro veces más rápido.
+    #[serde(default = "one")]
+    pub speed: f64,
+    /// 0 = sin sonido, 1 = original, hasta 2 = el doble.
+    #[serde(default = "one")]
+    pub volume: f64,
+    /// Qué parte de la imagen queda al recortar a otro formato: 0 = izquierda
+    /// o arriba, 0.5 = centro, 1 = derecha o abajo.
+    #[serde(default = "half")]
+    pub crop_x: f64,
+    #[serde(default = "half")]
+    pub crop_y: f64,
+}
+
+impl TimelineItem {
+    /// Duración en el video final, ya con la velocidad aplicada.
+    pub fn output_duration(&self) -> f64 {
+        (self.out_point - self.in_point) / self.speed
+    }
+}
+
+/// Cómo cabe un clip en un formato distinto al suyo.
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Fit {
+    /// Llena el cuadro y corta lo que sobra (lo habitual para vertical).
+    #[default]
+    Crop,
+    /// Muestra todo con barras negras.
+    Pad,
 }
 
 #[derive(Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -57,6 +97,8 @@ pub struct ExportSettings {
     pub width: u32,
     pub height: u32,
     pub fps: f64,
+    #[serde(default)]
+    pub fit: Fit,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -125,9 +167,29 @@ fn encoder_args(settings: &ExportSettings) -> Vec<String> {
     args.into_iter().map(String::from).collect()
 }
 
+/// `atempo` solo acepta de 0.5 a 2: velocidades fuera de ese rango se encadenan.
+fn atempo_chain(speed: f64) -> Vec<String> {
+    let mut left = speed;
+    let mut chain = Vec::new();
+    while left > 2.0 {
+        chain.push("atempo=2".to_string());
+        left /= 2.0;
+    }
+    while left < 0.5 {
+        chain.push("atempo=0.5".to_string());
+        left /= 0.5;
+    }
+    if (left - 1.0).abs() > 1e-6 {
+        chain.push(format!("atempo={left:.4}"));
+    }
+    chain
+}
+
 /// Arma los argumentos de ffmpeg para exportar la línea de tiempo a `output`.
 /// Cada clip se recorta al leerlo, se le aplica la LUT si corresponde, se
-/// lleva a la resolución y cuadros por segundo de salida, y después se unen.
+/// encuadra al formato de salida (recortando o con barras), se cambia su
+/// velocidad y volumen, se lleva a los cuadros por segundo de salida y
+/// después se unen.
 pub fn build_export_args(items: &[TimelineItem], settings: &ExportSettings, output: &Path) -> Result<Vec<String>, String> {
     if items.is_empty() {
         return Err("La línea de tiempo está vacía".into());
@@ -146,10 +208,14 @@ pub fn build_export_args(items: &[TimelineItem], settings: &ExportSettings, outp
     let mut graph = Vec::new();
     let mut concat_inputs = String::new();
 
+    let aspect = f64::from(w) / f64::from(h);
     for (i, item) in items.iter().enumerate() {
         let duration = item.out_point - item.in_point;
         if !(duration > 0.0) {
             return Err(format!("El clip {} tiene el final antes del inicio", i + 1));
+        }
+        if !(0.1..=16.0).contains(&item.speed) {
+            return Err(format!("La velocidad del clip {} debe estar entre 0.1× y 16×", i + 1));
         }
         args.extend(["-ss".into(), secs(item.in_point), "-t".into(), secs(duration), "-i".into(), item.path.clone()]);
 
@@ -157,19 +223,43 @@ pub fn build_export_args(items: &[TimelineItem], settings: &ExportSettings, outp
         if item.apply_lut {
             video.push(lut_filter());
         }
-        video.push(format!("scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos"));
-        video.push(format!("pad={w}:{h}:(ow-iw)/2:(oh-ih)/2"));
+        match settings.fit {
+            Fit::Crop => {
+                // El mayor rectángulo del formato de salida que cabe en el clip,
+                // movido según crop_x/crop_y.
+                let (px, py) = (item.crop_x.clamp(0.0, 1.0), item.crop_y.clamp(0.0, 1.0));
+                video.push(format!(
+                    "crop=w='min(iw,ih*{aspect:.6})':h='min(ih,iw/{aspect:.6})':x='(iw-ow)*{px:.4}':y='(ih-oh)*{py:.4}'"
+                ));
+                video.push(format!("scale={w}:{h}:flags=lanczos"));
+            }
+            Fit::Pad => {
+                video.push(format!("scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos"));
+                video.push(format!("pad={w}:{h}:(ow-iw)/2:(oh-ih)/2"));
+            }
+        }
         video.push("setsar=1".into());
+        if (item.speed - 1.0).abs() > 1e-6 {
+            // En cámara lenta, un clip de 120 fps conserva todos sus cuadros.
+            video.push(format!("setpts=(PTS-STARTPTS)/{:.6}", item.speed));
+        }
         video.push(format!("fps={}", settings.fps));
         // ffmpeg toma las etiquetas de color de los cuadros, no de las opciones
         // de salida; sin esto el archivo queda con primarios y curva "unknown".
         video.push("setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv".into());
         graph.push(format!("[{i}:v:0]{}[v{i}]", video.join(",")));
 
-        if item.has_audio {
-            graph.push(format!("[{i}:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a{i}]"));
+        let gain = item.volume.clamp(0.0, 2.0);
+        if item.has_audio && gain > 0.0 {
+            let mut audio = vec!["asetpts=PTS-STARTPTS".to_string()];
+            audio.extend(atempo_chain(item.speed));
+            if (gain - 1.0).abs() > 1e-6 {
+                audio.push(format!("volume={gain:.3}"));
+            }
+            audio.push("aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo".into());
+            graph.push(format!("[{i}:a:0]{}[a{i}]", audio.join(",")));
         } else {
-            graph.push(format!("anullsrc=r=48000:cl=stereo,atrim=duration={}[a{i}]", secs(duration)));
+            graph.push(format!("anullsrc=r=48000:cl=stereo,atrim=duration={}[a{i}]", secs(item.output_duration())));
         }
         concat_inputs.push_str(&format!("[v{i}][a{i}]"));
     }
@@ -216,7 +306,7 @@ pub fn run_export(
     let partial = parent.join(format!("{stem}.exportando.{ext}"));
 
     let args = build_export_args(items, settings, &partial)?;
-    let total: f64 = items.iter().map(|i| i.out_point - i.in_point).sum();
+    let total: f64 = items.iter().map(TimelineItem::output_duration).sum();
 
     let mut child = tools
         .ffmpeg()
@@ -355,11 +445,49 @@ mod tests {
             width: 1920,
             height: 1080,
             fps: 30.0,
+            fit: Fit::Pad,
         }
     }
 
     fn item(path: &str, apply_lut: bool, has_audio: bool) -> TimelineItem {
-        TimelineItem { path: path.into(), in_point: 1.0, out_point: 3.5, apply_lut, has_audio }
+        TimelineItem {
+            path: path.into(),
+            in_point: 1.0,
+            out_point: 3.5,
+            apply_lut,
+            has_audio,
+            speed: 1.0,
+            volume: 1.0,
+            crop_x: 0.5,
+            crop_y: 0.5,
+        }
+    }
+
+    #[test]
+    fn speed_volume_and_vertical_crop() {
+        let slow = TimelineItem { speed: 0.25, volume: 0.5, crop_x: 0.0, ..item("a.mp4", false, true) };
+        let fast_muted = TimelineItem { speed: 4.0, volume: 0.0, ..item("b.mp4", false, true) };
+        let vertical = ExportSettings { width: 1080, height: 1920, fit: Fit::Crop, ..settings() };
+        let args = build_export_args(&[slow.clone(), fast_muted.clone()], &vertical, Path::new("o.mp4")).unwrap();
+        let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
+        assert!(graph.contains("crop=w='min(iw,ih*0.562500)':h='min(ih,iw/0.562500)':x='(iw-ow)*0.0000'"), "{graph}");
+        assert!(graph.contains("scale=1080:1920:flags=lanczos"));
+        assert!(graph.contains("setpts=(PTS-STARTPTS)/0.250000"));
+        assert!(graph.contains("atempo=0.5,atempo=0.5000,volume=0.500"), "{graph}");
+        // Sin volumen, silencio con la duración ya acelerada: 2.5 s / 4.
+        assert!(graph.contains("anullsrc=r=48000:cl=stereo,atrim=duration=0.625[a1]"), "{graph}");
+        assert!((slow.output_duration() - 10.0).abs() < 1e-9);
+
+        let too_fast = TimelineItem { speed: 20.0, ..item("c.mp4", false, true) };
+        assert!(build_export_args(&[too_fast], &settings(), Path::new("o.mp4")).is_err());
+    }
+
+    #[test]
+    fn atempo_chains_beyond_its_range() {
+        assert_eq!(atempo_chain(1.0), Vec::<String>::new());
+        assert_eq!(atempo_chain(1.5), ["atempo=1.5000"]);
+        assert_eq!(atempo_chain(4.0), ["atempo=2", "atempo=2.0000"]);
+        assert_eq!(atempo_chain(0.1), ["atempo=0.5", "atempo=0.5", "atempo=0.5", "atempo=0.8000"]);
     }
 
     #[test]
@@ -456,8 +584,8 @@ mod tests {
         install_lut(&lut_path, &cache).unwrap();
 
         let items = [
-            TimelineItem { path: p("dlog.mp4"), in_point: 0.5, out_point: 2.5, apply_lut: true, has_audio: true },
-            TimelineItem { path: p("vertical.mp4"), in_point: 0.0, out_point: 1.5, apply_lut: false, has_audio: false },
+            TimelineItem { path: p("dlog.mp4"), in_point: 0.5, out_point: 2.5, apply_lut: true, ..item("", false, true) },
+            TimelineItem { path: p("vertical.mp4"), in_point: 0.0, out_point: 1.5, ..item("", false, false) },
         ];
         let settings = ExportSettings {
             output: p("salida final.mp4"),
@@ -467,6 +595,7 @@ mod tests {
             width: 1920,
             height: 1080,
             fps: 30.0,
+            fit: Fit::Pad,
         };
         let running = RunningExport::default();
         let mut updates = Vec::new();
@@ -500,6 +629,40 @@ mod tests {
         assert!(proxy_info.browser_playable && proxy_info.height == 540, "{proxy_info:?}");
     }
 
+    /// Cámara lenta, acelerado y vertical con ffmpeg real: `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn exports_slow_motion_and_vertical_crop() {
+        let tools = Tools::locate(None).expect("ffmpeg en el PATH");
+        let dir = tempfile::tempdir().unwrap();
+        let p = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
+        // 2 s a 120 fps con sonido, como un clip de cámara lenta de la Action 5 Pro.
+        ffmpeg_ok(&tools, &[
+            "-f", "lavfi", "-i", "testsrc2=s=1280x960:r=120:d=2", "-f", "lavfi", "-i", "sine=f=440:d=2",
+            "-pix_fmt", "yuv420p", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", &p("rapido.mp4"),
+        ]);
+        let items = [
+            TimelineItem { path: p("rapido.mp4"), in_point: 0.0, out_point: 1.0, speed: 0.25, crop_x: 0.0, ..item("", false, true) },
+            TimelineItem { path: p("rapido.mp4"), in_point: 0.0, out_point: 2.0, speed: 4.0, volume: 0.0, ..item("", false, true) },
+        ];
+        let settings = ExportSettings {
+            output: p("vertical.mp4"),
+            encoder: Encoder::Cpu,
+            width: 720,
+            height: 1280,
+            fps: 30.0,
+            fit: Fit::Crop,
+            ..settings()
+        };
+        let running = RunningExport::default();
+        let out = run_export(&tools, dir.path(), &items, &settings, &running, |_| {}).unwrap();
+        let info = crate::media::probe(&tools, &out).unwrap();
+        assert_eq!((info.width, info.height), (720, 1280));
+        // 1 s a 0.25× = 4 s, más 2 s a 4× = 0.5 s.
+        assert!((info.duration - 4.5).abs() < 0.15, "duración {}", info.duration);
+        assert!(info.has_audio);
+    }
+
     #[test]
     #[ignore]
     fn cancelling_removes_partial_output() {
@@ -510,9 +673,7 @@ mod tests {
             "-f", "lavfi", "-i", "testsrc2=s=1920x1080:r=30:d=40", "-c:v", "libx264", "-preset", "ultrafast",
             src.to_str().unwrap(),
         ]);
-        let items = [TimelineItem {
-            path: src.to_string_lossy().into_owned(), in_point: 0.0, out_point: 40.0, apply_lut: false, has_audio: false,
-        }];
+        let items = [TimelineItem { path: src.to_string_lossy().into_owned(), in_point: 0.0, out_point: 40.0, ..item("", false, false) }];
         let settings = ExportSettings {
             output: dir.path().join("cancelado.mp4").to_string_lossy().into_owned(),
             codec: Codec::Hevc,
@@ -521,6 +682,7 @@ mod tests {
             width: 1920,
             height: 1080,
             fps: 30.0,
+            fit: Fit::Pad,
         };
         let running = std::sync::Arc::new(RunningExport::default());
         let canceller = {
