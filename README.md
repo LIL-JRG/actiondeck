@@ -13,9 +13,10 @@ Fases siguientes: transferencia por Wi-Fi y detección por Bluetooth (fase 2), D
 
 ## Requisitos
 
-- Windows 10/11 con WebView2.
-- ffmpeg y ffprobe en el PATH (`winget install Gyan.FFmpeg`) o en una carpeta elegida en Ajustes.
-- Para desarrollar: Node.js 22+, Rust estable y Visual Studio Build Tools (C++).
+- **Windows 10/11** con WebView2. ffmpeg y ffprobe: `winget install Gyan.FFmpeg`. Exporta rápido con GPU NVIDIA (NVENC) si hay una.
+- **macOS 12+**. ffmpeg y ffprobe: `brew install ffmpeg` (la app los busca también en `/opt/homebrew/bin` y `/usr/local/bin`). Exporta rápido con VideoToolbox. La cámara o la microSD se detectan en `/Volumes`.
+- También se puede elegir la carpeta de ffmpeg en Ajustes.
+- Para desarrollar: Node.js 22+ y Rust estable, más Visual Studio Build Tools (C++) en Windows o Xcode Command Line Tools (`xcode-select --install`) en macOS. El instalador de Mac (`.app`/`.dmg`) solo se puede generar en una Mac.
 
 ## Desarrollo
 
@@ -36,6 +37,12 @@ npm run tauri build                     # instalador NSIS en src-tauri\target\re
 - `src/`: interfaz en React (Importar, Editar y exportar, Ajustes).
 
 Los ajustes se guardan en `%APPDATA%\com.jorge.actiondeck\settings.json`; miniaturas, vistas previas y la LUT activa, en `%LOCALAPPDATA%\com.jorge.actiondeck`.
+
+## Pendiente de probar en Mac
+
+- Compilar: el código exclusivo de macOS (detección en `/Volumes`, VideoToolbox) solo se revisó a mano, porque no se puede compilar para Mac desde Windows.
+- La calidad de VideoToolbox se traduce de CRF de forma aproximada (CRF 20 ≈ `-q:v 70`); conviene compararla con la de la CPU.
+- Que WKWebView reproduzca directamente los HEVC de la cámara; si no, la app genera la vista previa ligera sola.
 
 ## Pendiente de probar con la cámara real
 

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   api,
+  baseName,
   errorText,
   onImportProgress,
   type CameraDrive,
@@ -103,8 +104,8 @@ export function ImportView({ libraryDir, libraryFiles, onImported, onError }: Pr
       const result = await api.startImport(chosen.map((f) => f.path));
       setSummary(result);
       // Lo que ya se copió deja de estar seleccionado; solo queda lo que falló.
-      const done = new Set([...result.copied, ...result.skipped].map((p) => p.split("\\").pop()!.toLowerCase()));
-      setSelected((prev) => new Set([...prev].filter((p) => !done.has(p.split("\\").pop()!.toLowerCase()))));
+      const done = new Set([...result.copied, ...result.skipped].map((p) => baseName(p).toLowerCase()));
+      setSelected((prev) => new Set([...prev].filter((p) => !done.has(baseName(p).toLowerCase()))));
       onImported();
     } catch (e) {
       onError(errorText(e));

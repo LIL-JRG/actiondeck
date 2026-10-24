@@ -1,6 +1,6 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { api, errorText, type Settings } from "./api";
+import { api, errorText, hardwareName, type Settings } from "./api";
 
 const DJI_DOWNLOADS = "https://www.dji.com/downloads/djiapp/dji-mimo";
 
@@ -87,9 +87,12 @@ export function SettingsView({ settings, onChange, onError }: Props) {
             ffmpeg encontrado{settings.ffmpegDir ? ` en ${settings.ffmpegDir}` : " en el sistema"}.
           </p>
         )}
-        <p className="status">
-          Aceleración NVIDIA: H.264 {settings.nvencH264 ? "sí" : "no"} · H.265 10 bits {settings.nvencHevc ? "sí" : "no"}
-        </p>
+        {settings.hardware && (
+          <p className="status">
+            Aceleración ({hardwareName(settings.hardware.encoder)}): H.264 {settings.hardware.h264 ? "sí" : "no"} ·
+            H.265 10 bits {settings.hardware.hevc ? "sí" : "no"}
+          </p>
+        )}
         <div className="row">
           <button className="secondary" onClick={pickFfmpeg}>
             Elegir carpeta de ffmpeg…

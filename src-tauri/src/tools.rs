@@ -3,6 +3,24 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::render::Encoder;
+
+/// Una app de macOS abierta desde el Finder no hereda el PATH de la terminal,
+/// así que no vería el ffmpeg de Homebrew sin estas rutas.
+#[cfg(target_os = "macos")]
+const SYSTEM_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin"];
+#[cfg(target_os = "linux")]
+const SYSTEM_DIRS: &[&str] = &["/usr/bin", "/usr/local/bin"];
+#[cfg(windows)]
+const SYSTEM_DIRS: &[&str] = &[];
+
+#[cfg(target_os = "macos")]
+const INSTALL_HINT: &str = "brew install ffmpeg";
+#[cfg(windows)]
+const INSTALL_HINT: &str = "winget install Gyan.FFmpeg";
+#[cfg(target_os = "linux")]
+const INSTALL_HINT: &str = "con el gestor de paquetes de tu distribución";
+
 #[derive(Clone, Debug)]
 pub struct Tools {
     pub ffmpeg: PathBuf,
@@ -11,7 +29,8 @@ pub struct Tools {
 
 impl Tools {
     /// Busca primero junto al ejecutable (versión empaquetada), después en el
-    /// directorio configurado y por último en el PATH.
+    /// directorio configurado, en las carpetas habituales del sistema y por
+    /// último en el PATH.
     pub fn locate(configured_dir: Option<&Path>) -> Result<Self, String> {
         let exe_dir = std::env::current_exe()
             .ok()
@@ -19,6 +38,7 @@ impl Tools {
         let candidates: Vec<PathBuf> = exe_dir
             .into_iter()
             .chain(configured_dir.map(Path::to_path_buf))
+            .chain(SYSTEM_DIRS.iter().map(PathBuf::from))
             .collect();
 
         let find = |name: &str| -> Option<PathBuf> {
@@ -32,9 +52,9 @@ impl Tools {
 
         match (find("ffmpeg"), find("ffprobe")) {
             (Some(ffmpeg), Some(ffprobe)) => Ok(Self { ffmpeg, ffprobe }),
-            _ => Err("No encontré ffmpeg y ffprobe. Instálalos (winget install Gyan.FFmpeg) \
-                      o indica su carpeta en Ajustes."
-                .into()),
+            _ => Err(format!(
+                "No encontré ffmpeg y ffprobe. Instálalos ({INSTALL_HINT}) o indica su carpeta en Ajustes."
+            )),
         }
     }
 
@@ -82,8 +102,28 @@ pub fn available_encoders(tools: &Tools) -> Vec<String> {
         .collect()
 }
 
+/// Codificador de hardware de esta plataforma y qué formatos admite de verdad.
+#[derive(serde::Serialize, Clone, Copy, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Hardware {
+    pub encoder: Encoder,
+    pub h264: bool,
+    pub hevc: bool,
+}
+
+pub fn detect_hardware(tools: &Tools) -> Hardware {
+    #[cfg(target_os = "macos")]
+    let (encoder, h264, hevc) = (Encoder::VideoToolbox, "h264_videotoolbox", "hevc_videotoolbox");
+    #[cfg(not(target_os = "macos"))]
+    let (encoder, h264, hevc) = (Encoder::Nvenc, "h264_nvenc", "hevc_nvenc");
+
+    let names = available_encoders(tools);
+    let works = |enc: &str, fmt: &str| names.iter().any(|n| n == enc) && encoder_works(tools, enc, fmt);
+    Hardware { encoder, h264: works(h264, "yuv420p"), hevc: works(hevc, "p010le") }
+}
+
 /// ffmpeg lista codificadores aunque la GPU no los admita; hace falta una
-/// prueba real para saber si NVENC funciona en esta máquina.
+/// prueba real para saber si NVENC o VideoToolbox funcionan en esta máquina.
 pub fn encoder_works(tools: &Tools, encoder: &str, pix_fmt: &str) -> bool {
     tools
         .ffmpeg()

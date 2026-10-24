@@ -30,17 +30,13 @@ struct AppState {
     default_library: PathBuf,
     import_cancel: AtomicBool,
     export: RunningExport,
-    /// Resultado de probar NVENC (H.264, HEVC); se borra al cambiar de ffmpeg.
-    nvenc: Mutex<Option<(bool, bool)>>,
+    /// Resultado de probar el codificador de hardware; se borra al cambiar de ffmpeg.
+    hardware: Mutex<Option<tools::Hardware>>,
 }
 
 impl AppState {
-    fn nvenc(&self, tools: &Tools) -> (bool, bool) {
-        *self.nvenc.lock().unwrap().get_or_insert_with(|| {
-            let names = tools::available_encoders(tools);
-            let works = |enc: &str, fmt: &str| names.iter().any(|n| n == enc) && tools::encoder_works(tools, enc, fmt);
-            (works("h264_nvenc", "yuv420p"), works("hevc_nvenc", "p010le"))
-        })
+    fn hardware(&self, tools: &Tools) -> tools::Hardware {
+        *self.hardware.lock().unwrap().get_or_insert_with(|| tools::detect_hardware(tools))
     }
 
     fn settings(&self) -> Settings {
@@ -75,22 +71,22 @@ struct SettingsView {
     ffmpeg_error: Option<String>,
     lut_name: Option<String>,
     lut_size: Option<u32>,
-    nvenc_h264: bool,
-    nvenc_hevc: bool,
+    hardware: Option<tools::Hardware>,
+    platform: &'static str,
 }
 
 fn view(state: &AppState) -> SettingsView {
     let settings = state.settings();
     let tools = state.tools();
-    let (nvenc_h264, nvenc_hevc) = tools.as_ref().map(|t| state.nvenc(t)).unwrap_or((false, false));
+    let hardware = tools.as_ref().ok().map(|t| state.hardware(t));
     SettingsView {
         library_dir: state.library().to_string_lossy().into_owned(),
         ffmpeg_dir: settings.ffmpeg_dir.map(|p| p.to_string_lossy().into_owned()),
         ffmpeg_error: tools.err(),
         lut_name: settings.lut_name,
         lut_size: settings.lut_size,
-        nvenc_h264,
-        nvenc_hevc,
+        hardware,
+        platform: std::env::consts::OS,
     }
 }
 
@@ -130,7 +126,7 @@ async fn set_library_dir(app: AppHandle, state: State<'_, AppState>, path: Strin
 #[tauri::command]
 async fn set_ffmpeg_dir(state: State<'_, AppState>, path: Option<String>) -> Result<SettingsView, String> {
     state.update(|s| s.ffmpeg_dir = path.map(PathBuf::from))?;
-    *state.nvenc.lock().unwrap() = None;
+    *state.hardware.lock().unwrap() = None;
     Ok(view(&state))
 }
 
@@ -249,23 +245,24 @@ async fn compare_frames(state: State<'_, AppState>, path: String, at: f64) -> Re
     .await
 }
 
-/// Devuelve un archivo que la vista previa puede reproducir: el original si es
-/// H.264 de 8 bits, si no una copia liviana generada una sola vez.
+/// Devuelve un archivo que la vista previa puede reproducir: el original si el
+/// visor lo admite, si no una copia liviana generada una sola vez. La interfaz
+/// pide `force_proxy` cuando el visor no logró reproducir el original.
 #[tauri::command]
-async fn preview_source(state: State<'_, AppState>, path: String) -> Result<String, String> {
+async fn preview_source(state: State<'_, AppState>, path: String, force_proxy: Option<bool>) -> Result<String, String> {
     let tools = state.tools()?;
     let cache = state.cache_dir.clone();
-    let (nvenc_h264, _) = state.nvenc(&tools);
+    let hardware = state.hardware(&tools);
     blocking(move || {
         let source = PathBuf::from(&path);
         let info = media::probe(&tools, &source)?;
-        if info.browser_playable {
+        if info.browser_playable && !force_proxy.unwrap_or(false) {
             return Ok(path);
         }
         let out = cache.join("proxies").join(format!("{}.mp4", cache_key(&source, "proxy")));
         if !out.is_file() {
             std::fs::create_dir_all(out.parent().unwrap()).map_err(|e| e.to_string())?;
-            let encoder = if nvenc_h264 { Encoder::Nvenc } else { Encoder::Cpu };
+            let encoder = if hardware.h264 { hardware.encoder } else { Encoder::Cpu };
             render::make_proxy(&tools, &source, encoder, &out)?;
         }
         Ok(out.to_string_lossy().into_owned())
@@ -330,7 +327,7 @@ pub fn run() {
                 default_library,
                 import_cancel: AtomicBool::new(false),
                 export: RunningExport::default(),
-                nvenc: Mutex::new(None),
+                hardware: Mutex::new(None),
             });
             Ok(())
         })
