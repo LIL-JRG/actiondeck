@@ -1,3 +1,4 @@
+mod camera_wifi;
 mod import;
 mod media;
 mod render;
@@ -36,6 +37,7 @@ struct AppState {
     hardware: Mutex<Option<tools::Hardware>>,
     /// Cámaras encendidas cerca, según la detección por Bluetooth.
     nearby: Mutex<Nearby>,
+    camera_wifi: camera_wifi::CameraWifi,
 }
 
 impl AppState {
@@ -298,6 +300,23 @@ async fn start_export(
 }
 
 #[tauri::command]
+async fn wireless_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<MediaFile>, String> {
+    state.camera_wifi.connect(&app).await
+}
+
+#[tauri::command]
+async fn wireless_import(app: AppHandle, state: State<'_, AppState>, paths: Vec<String>) -> Result<import::ImportSummary, String> {
+    let library = state.library();
+    state.camera_wifi.import(&app, paths, library).await
+}
+
+#[tauri::command]
+async fn wireless_disconnect(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    state.camera_wifi.disconnect(&app).await;
+    Ok(())
+}
+
+#[tauri::command]
 fn nearby_cameras(state: State<'_, AppState>) -> Nearby {
     state.nearby.lock().unwrap().clone()
 }
@@ -338,6 +357,7 @@ pub fn run() {
                 export: RunningExport::default(),
                 hardware: Mutex::new(None),
                 nearby: Mutex::new(Nearby::default()),
+                camera_wifi: camera_wifi::CameraWifi::default(),
             });
 
             // Como Mimo: detecta la cámara en cuanto se enciende.
@@ -366,6 +386,9 @@ pub fn run() {
             start_export,
             cancel_export,
             nearby_cameras,
+            wireless_connect,
+            wireless_import,
+            wireless_disconnect,
         ])
         .run(tauri::generate_context!())
         .expect("error al iniciar ActionDeck");

@@ -3,7 +3,10 @@
 
 pub mod ble;
 pub mod config;
+pub mod datalink;
+pub mod download;
 pub mod duml;
 pub mod log;
+pub mod manifest;
 pub mod watch;
 pub mod wifi;

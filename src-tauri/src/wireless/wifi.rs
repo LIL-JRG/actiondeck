@@ -100,9 +100,40 @@ pub fn join(log: &Log, ssid: &str, password: &str) -> Result<Joined, String> {
     platform::join(log, ssid, password)
 }
 
+/// Como `join`, pero reintenta: la red de la cámara tarda unos segundos en
+/// aparecer después de despertarla por Bluetooth.
+pub fn join_when_visible(log: &Log, ssid: &str, password: &str, limit: Duration) -> Result<Joined, String> {
+    let start = Instant::now();
+    loop {
+        match join(log, ssid, password) {
+            Ok(joined) => return Ok(joined),
+            Err(e) if start.elapsed() < limit => {
+                log.line(format!("Aún no pude unirme ({e}); reintento en 3 s"));
+                std::thread::sleep(Duration::from_secs(3));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 pub fn leave(log: &Log, joined: &Joined) -> Result<(), String> {
     log.line(format!("Saliendo de {}", joined.ssid));
     platform::leave(log, joined)
+}
+
+/// Espera a que vuelva internet tras dejar la red de la cámara.
+pub fn wait_internet(log: &Log, limit: Duration) -> bool {
+    let probe: SocketAddr = "1.1.1.1:443".parse().unwrap();
+    let start = Instant::now();
+    while start.elapsed() < limit {
+        if TcpStream::connect_timeout(&probe, Duration::from_millis(800)).is_ok() {
+            log.line(format!("Internet de vuelta ({} ms)", start.elapsed().as_millis()));
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(700));
+    }
+    log.line(format!("Internet no volvió en {} s", limit.as_secs()));
+    false
 }
 
 fn xml_escape(s: &str) -> String {
