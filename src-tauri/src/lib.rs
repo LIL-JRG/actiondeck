@@ -210,11 +210,11 @@ async fn thumbnail(state: State<'_, AppState>, path: String) -> Result<String, S
     let cache = state.cache_dir.clone();
     blocking(move || {
         let source = PathBuf::from(&path);
-        let out = cache.join("thumbs").join(format!("{}.jpg", cache_key(&source, "thumb")));
+        let out = cache.join("thumbs").join(format!("{}.jpg", cache_key(&source, "thumb360")));
         if !out.is_file() {
             std::fs::create_dir_all(out.parent().unwrap()).map_err(|e| e.to_string())?;
             let at = media::probe(&tools, &source).map(|i| (i.duration / 3.0).min(2.0)).unwrap_or(0.0);
-            render::extract_frame(&tools, &cache, &source, at, false, 180, &out)?;
+            render::extract_frame(&tools, &cache, &source, at, false, 360, &out)?;
         }
         Ok(out.to_string_lossy().into_owned())
     })

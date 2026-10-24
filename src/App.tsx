@@ -1,151 +1,259 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  api,
-  errorText,
-  onNearbyCameras,
-  type MediaFile,
-  type Nearby,
-  type NearbyCamera,
-  type Settings,
-  type TimelineItem,
-} from "./api";
-import { EditView } from "./EditView";
-import { ImportView } from "./ImportView";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { AnimatePresence, motion, MotionConfig } from "motion/react";
+import { api, errorText, type MediaFile, type NearbyCamera, type Settings, type TimelineItem } from "./api";
+import { AlbumView, type Scope } from "./AlbumView";
+import { useCamera, useImporter } from "./camera";
+import { DeviceSheet } from "./DeviceSheet";
+import { EditView, type EditRequest, type ToolId } from "./EditView";
+import { HomeView } from "./HomeView";
+import { AlbumIcon, CameraIcon, ClapperIcon, CloseIcon, HomeIcon, SettingsIcon } from "./icons";
+import { useLocalMeta } from "./library";
 import { SettingsView } from "./SettingsView";
 import "./App.css";
 
-type Tab = "import" | "edit" | "settings";
+type Tab = "home" | "album" | "edit" | "settings";
 
-const TABS: { id: Tab; label: string }[] = [
-  { id: "import", label: "Importar" },
-  { id: "edit", label: "Editar y exportar" },
-  { id: "settings", label: "Ajustes" },
+const TABS: { id: Tab; label: string; icon: typeof HomeIcon }[] = [
+  { id: "home", label: "Inicio", icon: HomeIcon },
+  { id: "album", label: "Álbum", icon: AlbumIcon },
+  { id: "edit", label: "Editor", icon: ClapperIcon },
+  { id: "settings", label: "Ajustes", icon: SettingsIcon },
 ];
 
 export default function App() {
-  const [tab, setTab] = useState<Tab>("import");
+  const [tab, setTab] = useState<Tab>("home");
+  const [scope, setScope] = useState<Scope>("device");
   const [settings, setSettings] = useState<Settings | null>(null);
   const [library, setLibrary] = useState<MediaFile[]>([]);
-  // La línea de tiempo vive aquí para no perderse al cambiar de pestaña.
+  // El proyecto vive aquí para no perderse al cambiar de pantalla.
   const [timeline, setTimeline] = useState<TimelineItem[]>([]);
+  const [editRequest, setEditRequest] = useState<EditRequest | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [nearby, setNearby] = useState<Nearby>({ bluetoothError: null, cameras: [] });
-  // Aviso de la cámara que se acaba de encender, como el de Mimo.
-  const [arrived, setArrived] = useState<NearbyCamera | null>(null);
-  const known = useRef<Set<string>>(new Set());
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const clearError = useCallback(() => setError(null), []);
 
-  useEffect(() => {
-    const update = (next: Nearby) => {
-      const fresh = next.cameras.find((c) => !known.current.has(c.id));
-      known.current = new Set(next.cameras.map((c) => c.id));
-      setNearby(next);
-      // Si la cámara del aviso sigue cerca, se muestran sus datos más recientes.
-      setArrived((shown) => fresh ?? next.cameras.find((c) => c.id === shown?.id) ?? null);
-    };
-    api.nearbyCameras().then(update).catch(() => {});
-    const pending = onNearbyCameras(update);
-    return () => {
-      pending.then((unlisten) => unlisten());
-    };
-  }, []);
-
+  const camera = useCamera();
   const refreshLibrary = useCallback(() => {
     api.libraryFiles().then(setLibrary).catch((e) => setError(errorText(e)));
   }, []);
+  const importer = useImporter(refreshLibrary, setError);
+  const libraryMeta = useLocalMeta(library, true);
 
   useEffect(() => {
     api.getSettings().then(setSettings).catch((e) => setError(errorText(e)));
   }, []);
 
+  // En macOS el contenido sube bajo la barra de título transparente.
+  useEffect(() => {
+    if (settings) document.documentElement.dataset.platform = settings.platform;
+  }, [settings?.platform]);
+
   useEffect(() => {
     if (settings) refreshLibrary();
   }, [settings?.libraryDir, refreshLibrary]);
 
+  // Como Mimo: al encender una cámara, la hoja de conexión sube sola.
+  useEffect(() => {
+    if (camera.arrived && camera.link.status === "idle") setSheetOpen(true);
+    // Solo cuando llega una cámara nueva.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [camera.arrived]);
+
+  const closeSheet = useCallback(() => {
+    setSheetOpen(false);
+    camera.forgetArrival();
+  }, [camera.forgetArrival]);
+
+  const showDeviceFiles = useCallback(() => {
+    closeSheet();
+    setScope("device");
+    setTab("album");
+  }, [closeSheet]);
+
+  const connect = (target: NearbyCamera) => {
+    setSheetOpen(true);
+    camera.connect(target);
+  };
+
+  const edit = (files: MediaFile[], tool: ToolId | null) => {
+    if (files.length === 0) return;
+    setEditRequest({ paths: files.map((f) => f.path), tool, nonce: Date.now() });
+    setTab("edit");
+  };
+
   if (!settings) {
-    return <div className="boot">{error ?? "Iniciando…"}</div>;
+    return <div className="boot">{error ?? <span className="spinner large" />}</div>;
   }
 
+
   return (
-    <div className="app">
-      <header className="topbar">
-        <span className="brand">ActionDeck</span>
-        <nav className="tabs" role="tablist">
-          {TABS.map((t) => (
-            <button key={t.id} role="tab" aria-selected={tab === t.id} className={tab === t.id ? "tab active" : "tab"} onClick={() => setTab(t.id)}>
-              {t.label}
-              {t.id === "edit" && timeline.length > 0 && <span className="count">{timeline.length}</span>}
-            </button>
-          ))}
-        </nav>
-        <CameraStatus nearby={nearby} />
-        {!settings.lutName && (
-          <button className="link" onClick={() => setTab("settings")}>
-            Falta elegir la LUT
-          </button>
-        )}
-      </header>
+    <MotionConfig reducedMotion="user">
+      <div className="app">
+        <div className="titlebar-space" data-tauri-drag-region />
 
-      {error && (
-        <div className="toast" role="alert">
-          <span>{error}</span>
-          <button className="icon" onClick={() => setError(null)} aria-label="Cerrar">
-            ×
-          </button>
-        </div>
-      )}
+        <main className="pages">
+          <Page active={tab === "home"}>
+            <HomeView
+              camera={camera}
+              library={library}
+              meta={libraryMeta}
+              timeline={timeline}
+              hasLut={settings.lutName !== null}
+              onConnect={connect}
+              onOpenDevice={showDeviceFiles}
+              onOpenLibrary={() => {
+                setScope("local");
+                setTab("album");
+              }}
+              onOpenEditor={() => setTab("edit")}
+              onOpenSettings={() => setTab("settings")}
+              onEdit={edit}
+            />
+          </Page>
+          <Page active={tab === "album"} className="page-album">
+            <AlbumView
+              library={library}
+              libraryMeta={libraryMeta}
+              libraryDir={settings.libraryDir}
+              camera={camera}
+              importer={importer}
+              scope={scope}
+              setScope={setScope}
+              onConnect={connect}
+              onEdit={edit}
+              onError={setError}
+            />
+          </Page>
+          <Page active={tab === "edit"} className="page-edit">
+            <EditView
+              active={tab === "edit"}
+              settings={settings}
+              library={library}
+              meta={libraryMeta}
+              timeline={timeline}
+              setTimeline={setTimeline}
+              request={editRequest}
+              onGoSettings={() => setTab("settings")}
+              onError={setError}
+            />
+          </Page>
+          <Page active={tab === "settings"}>
+            <SettingsView settings={settings} onChange={setSettings} onError={setError} />
+          </Page>
+        </main>
 
-      {arrived && (
-        <div className="notice" role="status">
-          <span>
-            <strong>{arrived.model}</strong> encendida ({arrived.name}).{" "}
-            <button className="link inline" onClick={() => setTab("import")}>
-              Importar sus videos por Wi-Fi
-            </button>
-          </span>
-          <button className="icon" onClick={() => setArrived(null)} aria-label="Cerrar">
-            ×
-          </button>
-        </div>
-      )}
+        <Dock tab={tab} setTab={setTab} clips={timeline.length} camera={camera} onCamera={() => setSheetOpen(true)} />
 
-      <main className="content">
-        {tab === "import" && (
-          <ImportView
-            libraryDir={settings.libraryDir}
-            libraryFiles={library}
-            nearby={nearby.cameras}
-            onImported={refreshLibrary}
-            onError={setError}
-          />
-        )}
-        {tab === "edit" && (
-          <EditView settings={settings} library={library} timeline={timeline} setTimeline={setTimeline} onError={setError} />
-        )}
-        {tab === "settings" && <SettingsView settings={settings} onChange={setSettings} onError={setError} />}
-      </main>
-    </div>
+        <DeviceSheet open={sheetOpen} onClose={closeSheet} camera={camera} onShowFiles={showDeviceFiles} />
+
+        <AnimatePresence>
+          {error && <Toast key={error} message={error} onClose={clearError} />}
+        </AnimatePresence>
+      </div>
+    </MotionConfig>
   );
 }
 
-function CameraStatus({ nearby }: { nearby: Nearby }) {
-  if (nearby.bluetoothError) {
-    return (
-      <span className="camera-status" title={nearby.bluetoothError}>
-        <span className="dot" /> Bluetooth no disponible
-      </span>
-    );
-  }
-  const [first, ...rest] = nearby.cameras;
-  if (!first) {
-    return (
-      <span className="camera-status" title="Enciende la cámara para que aparezca aquí">
-        <span className="dot" /> Sin cámara encendida
-      </span>
-    );
-  }
+/**
+ * Las pantallas siguen montadas al cambiar de pestaña (no se pierde lo que
+ * estaba abierto); la activa aparece con un desvanecido.
+ */
+function Page({ active, className = "", children }: { active: boolean; className?: string; children: ReactNode }) {
   return (
-    <span className="camera-status on" title={nearby.cameras.map((c) => c.name).join(", ")}>
-      <span className="dot" /> {first.model} encendida{rest.length > 0 && ` y ${rest.length} más`}
-    </span>
+    <motion.section
+      className={`page ${className}`}
+      aria-hidden={!active}
+      initial={false}
+      animate={active ? { opacity: 1, y: 0, visibility: "visible" } : { opacity: 0, y: 6, transitionEnd: { visibility: "hidden" } }}
+      transition={{ duration: active ? 0.28 : 0.12, ease: [0.2, 0.8, 0.2, 1] }}
+      style={{ pointerEvents: active ? "auto" : "none", zIndex: active ? 1 : 0 }}
+    >
+      {children}
+    </motion.section>
+  );
+}
+
+/** Barra flotante de Mimo: secciones a la izquierda y la cámara en el botón redondo. */
+function Dock({
+  tab,
+  setTab,
+  clips,
+  camera,
+  onCamera,
+}: {
+  tab: Tab;
+  setTab: (t: Tab) => void;
+  clips: number;
+  camera: ReturnType<typeof useCamera>;
+  onCamera: () => void;
+}) {
+  const { link, nearby } = camera;
+  const state =
+    link.status === "connected" ? "connected" : link.status === "connecting" ? "connecting" : nearby.cameras.length > 0 ? "nearby" : "none";
+  const cameraLabel = {
+    connected: `Conectada: ${link.status === "connected" ? link.camera.name : ""}`,
+    connecting: "Conectando con la cámara…",
+    nearby: `${nearby.cameras[0]?.name ?? "Cámara"} encendida cerca`,
+    none: nearby.bluetoothError ?? "Ninguna cámara cerca",
+  }[state];
+
+  return (
+    <nav className="dock" aria-label="Secciones">
+      <div className="dock-pill">
+        {TABS.map((t) => (
+          <button
+            key={t.id}
+            className={tab === t.id ? "dock-btn active" : "dock-btn"}
+            onClick={() => setTab(t.id)}
+            aria-label={t.label}
+            aria-current={tab === t.id ? "page" : undefined}
+          >
+            {tab === t.id && <motion.span layoutId="dock-active" className="dock-active" transition={{ type: "spring", stiffness: 500, damping: 38 }} />}
+            <t.icon size={26} />
+            {t.id === "edit" && clips > 0 && <span className="dock-count">{clips}</span>}
+            <span className="dock-tip">{t.label}</span>
+          </button>
+        ))}
+      </div>
+      <motion.button className={`dock-camera ${state}`} onClick={onCamera} aria-label={cameraLabel} whileTap={{ scale: 0.92 }}>
+        <CameraIcon size={28} />
+        {state === "connecting" && <span className="dock-ring" />}
+        <AnimatePresence>
+          {(state === "nearby" || state === "connected") && (
+            <motion.span
+              className="dock-badge"
+              initial={{ scale: 0 }}
+              animate={{ scale: 1 }}
+              exit={{ scale: 0 }}
+              transition={{ type: "spring", stiffness: 500, damping: 22 }}
+            />
+          )}
+        </AnimatePresence>
+        <span className="dock-tip">{cameraLabel}</span>
+      </motion.button>
+    </nav>
+  );
+}
+
+function Toast({ message, onClose }: { message: string; onClose: () => void }) {
+  useEffect(() => {
+    const timer = window.setTimeout(onClose, 8000);
+    return () => window.clearTimeout(timer);
+  }, [message, onClose]);
+  return (
+    <motion.div
+      className="toast"
+      role="alert"
+      initial={{ opacity: 0, y: -16, x: "-50%", scale: 0.96 }}
+      animate={{ opacity: 1, y: 0, x: "-50%", scale: 1 }}
+      exit={{ opacity: 0, y: -16, x: "-50%", scale: 0.96 }}
+      transition={{ type: "spring", stiffness: 420, damping: 32 }}
+    >
+      <span className="toast-dot" />
+      <span className="toast-text">{message}</span>
+      <button className="round small" onClick={onClose} aria-label="Cerrar">
+        <CloseIcon size={16} />
+      </button>
+    </motion.div>
   );
 }
