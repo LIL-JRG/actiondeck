@@ -5,6 +5,8 @@ import {
   api,
   errorText,
   fileUrl,
+  hardwareName,
+  joinPath,
   onExportProgress,
   type ClipInfo,
   type Codec,
@@ -173,16 +175,26 @@ function ClipEditor({
   const [frames, setFrames] = useState<{ before: string; after: string | null; stamp: number } | null>(null);
   const [comparing, setComparing] = useState(false);
 
+  const [forceProxy, setForceProxy] = useState(false);
+
   useEffect(() => {
     let alive = true;
+    setPreview(null);
     api
-      .previewSource(draft.path)
+      .previewSource(draft.path, forceProxy)
       .then((p) => alive && setPreview(p))
       .catch((e) => alive && setPreviewError(errorText(e)));
     return () => {
       alive = false;
     };
-  }, [draft.path]);
+  }, [draft.path, forceProxy]);
+
+  // Si el visor no logra reproducir el original (p. ej. un HEVC que este
+  // sistema no admite), se pide la copia ligera una sola vez.
+  const onVideoError = () => {
+    if (!forceProxy) setForceProxy(true);
+    else setPreviewError("No se pudo reproducir la vista previa.");
+  };
 
   const seek = (t: number) => {
     if (videoRef.current) videoRef.current.currentTime = t;
@@ -232,15 +244,23 @@ function ClipEditor({
           <h2>{draft.name}</h2>
           <p className="hint small">{describeClip(draft.info)}</p>
         </div>
-        {!draft.info.browserPlayable && preview && <span className="badge">Vista previa ligera</span>}
+        {(!draft.info.browserPlayable || forceProxy) && preview && <span className="badge">Vista previa ligera</span>}
       </header>
 
       <div className="player">
         {preview ? (
-          <video ref={videoRef} src={fileUrl(preview)} controls onTimeUpdate={onTime} onSeeked={onTime} preload="auto" />
+          <video
+            ref={videoRef}
+            src={fileUrl(preview)}
+            controls
+            onTimeUpdate={onTime}
+            onSeeked={onTime}
+            onError={onVideoError}
+            preload="auto"
+          />
         ) : (
           <div className="player-placeholder">
-            {previewError ?? (draft.info.browserPlayable ? "Cargando…" : "Preparando vista previa del video de 10 bits…")}
+            {previewError ?? (draft.info.browserPlayable && !forceProxy ? "Cargando…" : "Preparando vista previa ligera…")}
           </div>
         )}
       </div>
@@ -372,7 +392,8 @@ const FRAME_RATES = [24, 25, 30, 48, 50, 60, 100, 120];
 function ExportPanel({ settings, timeline, onError }: { settings: Settings; timeline: TimelineItem[]; onError: (m: string) => void }) {
   const first = timeline[0]?.info;
   const [codec, setCodec] = useState<Codec>("hevc");
-  const [encoder, setEncoder] = useState<Encoder>(settings.nvencHevc ? "nvenc" : "cpu");
+  const hardware = settings.hardware;
+  const [encoder, setEncoder] = useState<Encoder>(hardware?.hevc ? hardware.encoder : "cpu");
   const [quality, setQuality] = useState(20);
   const [resolution, setResolution] = useState("source");
   const [vertical, setVertical] = useState(false);
@@ -388,10 +409,10 @@ function ExportPanel({ settings, timeline, onError }: { settings: Settings; time
     };
   }, []);
 
-  const nvencOk = codec === "h264" ? settings.nvencH264 : settings.nvencHevc;
+  const hardwareOk = !!hardware && (codec === "h264" ? hardware.h264 : hardware.hevc);
   useEffect(() => {
-    if (encoder === "nvenc" && !nvencOk) setEncoder("cpu");
-  }, [encoder, nvencOk]);
+    if (encoder !== "cpu" && !hardwareOk) setEncoder("cpu");
+  }, [encoder, hardwareOk]);
 
   const size = (() => {
     if (resolution === "source" || !first) return first ? { w: even(first.width), h: even(first.height) } : null;
@@ -406,7 +427,7 @@ function ExportPanel({ settings, timeline, onError }: { settings: Settings; time
     if (!size) return;
     const output = await save({
       title: "Guardar video",
-      defaultPath: `${settings.libraryDir}\\Exportados\\ActionDeck_${localStamp()}.mp4`,
+      defaultPath: joinPath(settings.libraryDir, "Exportados", `ActionDeck_${localStamp()}.mp4`),
       filters: [{ name: "Video MP4", extensions: ["mp4"] }],
     });
     if (!output) return;
@@ -441,9 +462,11 @@ function ExportPanel({ settings, timeline, onError }: { settings: Settings; time
       <label className="field">
         Codificar con
         <select value={encoder} onChange={(e) => setEncoder(e.target.value as Encoder)} disabled={exporting}>
-          <option value="nvenc" disabled={!nvencOk}>
-            GPU NVIDIA (rápido){nvencOk ? "" : " — no disponible"}
-          </option>
+          {hardware && (
+            <option value={hardware.encoder} disabled={!hardwareOk}>
+              {hardwareName(hardware.encoder)} (rápido){hardwareOk ? "" : " — no disponible"}
+            </option>
+          )}
           <option value="cpu">Procesador (más lento, archivo más chico)</option>
         </select>
       </label>

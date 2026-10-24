@@ -30,11 +30,20 @@ pub enum Codec {
     Hevc,
 }
 
-#[derive(Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Encoder {
     Cpu,
+    /// GPU NVIDIA (Windows y Linux).
     Nvenc,
+    /// Codificador de hardware de Apple (macOS).
+    VideoToolbox,
+}
+
+/// VideoToolbox usa `-q:v` de 1 a 100 (más alto = mejor), al revés que CRF.
+/// La equivalencia es aproximada: CRF 20 ≈ q 70.
+fn videotoolbox_quality(crf: u8) -> String {
+    (110 - 2 * i32::from(crf.min(51))).clamp(1, 100).to_string()
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -95,7 +104,12 @@ fn lut_filter() -> String {
 
 fn encoder_args(settings: &ExportSettings) -> Vec<String> {
     let q = settings.quality.min(51).to_string();
+    let vt = videotoolbox_quality(settings.quality);
     let args: Vec<&str> = match (settings.codec, settings.encoder) {
+        (Codec::H264, Encoder::VideoToolbox) => vec!["-c:v", "h264_videotoolbox", "-q:v", &vt, "-pix_fmt", "yuv420p"],
+        (Codec::Hevc, Encoder::VideoToolbox) => vec![
+            "-c:v", "hevc_videotoolbox", "-q:v", &vt, "-pix_fmt", "p010le", "-profile:v", "main10", "-tag:v", "hvc1",
+        ],
         (Codec::H264, Encoder::Cpu) => vec!["-c:v", "libx264", "-preset", "medium", "-crf", &q, "-pix_fmt", "yuv420p"],
         (Codec::H264, Encoder::Nvenc) => vec![
             "-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", &q, "-b:v", "0", "-pix_fmt", "yuv420p",
@@ -308,6 +322,7 @@ pub fn make_proxy(tools: &Tools, source: &Path, encoder: Encoder, output: &Path)
     let partial = output.with_extension("part.mp4");
     let video_codec: &[&str] = match encoder {
         Encoder::Nvenc => &["-c:v", "h264_nvenc", "-preset", "p3", "-cq", "28"],
+        Encoder::VideoToolbox => &["-c:v", "h264_videotoolbox", "-q:v", "55"],
         Encoder::Cpu => &["-c:v", "libx264", "-preset", "veryfast", "-crf", "28"],
     };
     let out = tools
@@ -371,11 +386,21 @@ mod tests {
     }
 
     #[test]
-    fn hevc_nvenc_keeps_10_bit() {
-        let s = ExportSettings { codec: Codec::Hevc, encoder: Encoder::Nvenc, ..settings() };
-        let args = encoder_args(&s);
-        assert!(args.windows(2).any(|w| w == ["-pix_fmt", "p010le"]));
-        assert!(args.windows(2).any(|w| w == ["-profile:v", "main10"]));
+    fn hardware_hevc_keeps_10_bit() {
+        for encoder in [Encoder::Nvenc, Encoder::VideoToolbox] {
+            let s = ExportSettings { codec: Codec::Hevc, encoder, ..settings() };
+            let args = encoder_args(&s);
+            assert!(args.windows(2).any(|w| w == ["-pix_fmt", "p010le"]), "{encoder:?}");
+            assert!(args.windows(2).any(|w| w == ["-profile:v", "main10"]), "{encoder:?}");
+        }
+    }
+
+    #[test]
+    fn videotoolbox_quality_runs_opposite_to_crf() {
+        assert_eq!(videotoolbox_quality(20), "70");
+        assert_eq!(videotoolbox_quality(14), "82");
+        assert_eq!(videotoolbox_quality(51), "8");
+        assert_eq!(videotoolbox_quality(0), "100");
     }
 
     fn ffmpeg_ok(tools: &Tools, args: &[&str]) {

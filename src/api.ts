@@ -27,15 +27,23 @@ export type ClipInfo = {
 
 export type CameraDrive = { root: string; dcim: string; label: string; removable: boolean };
 
+export type Hardware = { encoder: Encoder; h264: boolean; hevc: boolean };
+
 export type Settings = {
   libraryDir: string;
   ffmpegDir: string | null;
   ffmpegError: string | null;
   lutName: string | null;
   lutSize: number | null;
-  nvencH264: boolean;
-  nvencHevc: boolean;
+  /** null si ffmpeg no está disponible. */
+  hardware: Hardware | null;
+  platform: "windows" | "macos" | "linux" | string;
 };
+
+/** Nombre visible del codificador de hardware de esta plataforma. */
+export function hardwareName(encoder: Encoder): string {
+  return encoder === "videotoolbox" ? "Apple VideoToolbox" : encoder === "nvenc" ? "GPU NVIDIA" : "Procesador";
+}
 
 export type ImportProgress = {
   fileIndex: number;
@@ -64,7 +72,7 @@ export type TimelineItem = {
 };
 
 export type Codec = "h264" | "hevc";
-export type Encoder = "cpu" | "nvenc";
+export type Encoder = "cpu" | "nvenc" | "videotoolbox";
 
 export type ExportSettings = {
   output: string;
@@ -93,7 +101,7 @@ export const api = {
   thumbnail: (path: string) => invoke<string>("thumbnail", { path }),
   compareFrames: (path: string, at: number) =>
     invoke<{ before: string; after: string | null }>("compare_frames", { path, at }),
-  previewSource: (path: string) => invoke<string>("preview_source", { path }),
+  previewSource: (path: string, forceProxy = false) => invoke<string>("preview_source", { path, forceProxy }),
   startExport: (items: TimelineItem[], settings: ExportSettings) =>
     invoke<string>("start_export", {
       items: items.map(({ path, inPoint, outPoint, applyLut, hasAudio }) => ({
@@ -120,6 +128,16 @@ export function onExportProgress(handler: (p: ExportProgress) => void): Promise<
 export function fileUrl(path: string, bust?: number): string {
   const url = convertFileSrc(path);
   return bust ? `${url}?v=${bust}` : url;
+}
+
+/** Une partes de una ruta con el separador que ya usa `base` (\ o /). */
+export function joinPath(base: string, ...parts: string[]): string {
+  const sep = base.includes("\\") ? "\\" : "/";
+  return [base.replace(/[\\/]+$/, ""), ...parts].join(sep);
+}
+
+export function baseName(path: string): string {
+  return path.split(/[\\/]/).pop() ?? path;
 }
 
 export function errorText(error: unknown): string {

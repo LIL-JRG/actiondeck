@@ -114,7 +114,7 @@ pub fn parse_probe(json: &Value) -> Result<ClipInfo, String> {
         width,
         height,
         fps,
-        browser_playable: codec == "h264" && bit_depth <= 8,
+        browser_playable: browser_playable(&codec, bit_depth),
         codec,
         pix_fmt,
         bit_depth,
@@ -123,6 +123,13 @@ pub fn parse_probe(json: &Value) -> Result<ClipInfo, String> {
         has_audio,
         creation_time,
     })
+}
+
+/// WebView2 (Windows) solo reproduce H.264 de 8 bits sin extensiones extra;
+/// WKWebView (macOS) también reproduce HEVC, incluido el de 10 bits.
+fn browser_playable(codec: &str, bit_depth: u32) -> bool {
+    let hevc_ok = cfg!(target_os = "macos") && codec == "hevc" && bit_depth <= 10;
+    (codec == "h264" && bit_depth <= 8) || hevc_ok
 }
 
 fn rotation(video: &Value) -> i64 {
@@ -235,7 +242,8 @@ pub struct CameraDrive {
 }
 
 /// Unidades con carpeta `DCIM`: la cámara conectada por USB o su microSD en un
-/// lector. Se omite C: para no recorrer el disco del sistema.
+/// lector. En Windows se omite C: para no recorrer el disco del sistema.
+#[cfg(windows)]
 pub fn camera_drives() -> Vec<CameraDrive> {
     let mut drives = Vec::new();
     for letter in b'D'..=b'Z' {
@@ -251,6 +259,40 @@ pub fn camera_drives() -> Vec<CameraDrive> {
             root,
         });
     }
+    drives
+}
+
+/// macOS monta cada disco en `/Volumes/<nombre>`; Linux, en `/media/<usuario>`
+/// o `/run/media/<usuario>`.
+#[cfg(not(windows))]
+pub fn camera_drives() -> Vec<CameraDrive> {
+    let user = std::env::var("USER").unwrap_or_default();
+    let mount_dirs = if cfg!(target_os = "macos") {
+        vec![PathBuf::from("/Volumes")]
+    } else {
+        vec![PathBuf::from("/media").join(&user), PathBuf::from("/run/media").join(&user)]
+    };
+    let mut drives = Vec::new();
+    for dir in mount_dirs {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let root = entry.path();
+            // En macOS el disco de arranque aparece como un enlace a `/`.
+            if root.is_symlink() {
+                continue;
+            }
+            let dcim = root.join("DCIM");
+            if dcim.is_dir() {
+                drives.push(CameraDrive {
+                    label: entry.file_name().to_string_lossy().into_owned(),
+                    removable: true,
+                    dcim: dcim.to_string_lossy().into_owned(),
+                    root: root.to_string_lossy().into_owned(),
+                });
+            }
+        }
+    }
+    drives.sort_by(|a, b| a.label.cmp(&b.label));
     drives
 }
 
@@ -286,16 +328,6 @@ fn volume_label(root: &str) -> Option<String> {
     (ok != 0 && len > 0).then(|| format!("{} ({})", String::from_utf16_lossy(&name[..len]), &root[..2]))
 }
 
-#[cfg(not(windows))]
-fn is_removable(_root: &str) -> bool {
-    false
-}
-
-#[cfg(not(windows))]
-fn volume_label(_root: &str) -> Option<String> {
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,7 +351,7 @@ mod tests {
         assert!((info.fps - 59.94).abs() < 0.01);
         assert!((info.duration - 12.512).abs() < 1e-9);
         assert!(info.has_audio);
-        assert!(!info.browser_playable);
+        assert_eq!(info.browser_playable, cfg!(target_os = "macos"));
     }
 
     #[test]
