@@ -76,6 +76,7 @@ fn find_in_path(file: &str) -> Option<PathBuf> {
 }
 
 fn quiet(program: &Path) -> Command {
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut cmd = Command::new(program);
     #[cfg(windows)]
     {

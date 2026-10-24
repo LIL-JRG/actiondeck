@@ -29,7 +29,13 @@ pub struct Joined {
 }
 
 fn run(log: &Log, program: &str, args: &[String]) -> Result<String, String> {
-    log.line(format!("$ {program} {}", args.join(" ")));
+    run_hiding(log, program, args, None)
+}
+
+/// Como `run`, pero `secret` (la contraseña, que en macOS y Linux va como
+/// argumento) no llega al registro ni al mensaje de error.
+fn run_hiding(log: &Log, program: &str, args: &[String], secret: Option<&str>) -> Result<String, String> {
+    log.line(command_line(program, args, secret));
     let mut cmd = Command::new(program);
     #[cfg(windows)]
     {
@@ -44,13 +50,30 @@ fn run(log: &Log, program: &str, args: &[String]) -> Result<String, String> {
     cmd.args(args);
     let out = cmd.output().map_err(|e| format!("No pude ejecutar {program}: {e}"))?;
     let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+    let shown = hide(&text, secret);
+    for line in shown.lines().filter(|l| !l.trim().is_empty()) {
         log.line(format!("  {}", line.trim_end()));
     }
     if !out.status.success() {
-        return Err(format!("{program} falló: {}", text.trim()));
+        return Err(format!("{program} falló: {}", shown.trim()));
     }
     Ok(text)
+}
+
+/// Línea `$ programa argumentos` para el registro, con `secret` oculto.
+fn command_line(program: &str, args: &[String], secret: Option<&str>) -> String {
+    let shown: Vec<String> = args
+        .iter()
+        .map(|a| if Some(a.as_str()) == secret { redact(a) } else { a.clone() })
+        .collect();
+    format!("$ {program} {}", shown.join(" "))
+}
+
+fn hide(text: &str, secret: Option<&str>) -> String {
+    match secret {
+        Some(s) if !s.is_empty() => text.replace(s, &redact(s)),
+        _ => text.to_string(),
+    }
 }
 
 /// ¿Responde la cámara en el puerto HTTP?
@@ -186,7 +209,12 @@ mod platform {
     pub fn join(log: &Log, ssid: &str, password: &str) -> Result<Joined, String> {
         let device = device(log)?;
         // networksetup devuelve 0 aunque falle; el error viene en el texto.
-        let out = run(log, "networksetup", &["-setairportnetwork".into(), device.clone(), ssid.into(), password.into()])?;
+        let out = run_hiding(
+            log,
+            "networksetup",
+            &["-setairportnetwork".into(), device.clone(), ssid.into(), password.into()],
+            Some(password),
+        )?;
         if out.contains("Error") || out.contains("Could not find") || out.contains("Failed") {
             return Err(format!("macOS no pudo unirse a {ssid}: {}", out.trim()));
         }
@@ -209,7 +237,12 @@ mod platform {
     pub fn join(log: &Log, ssid: &str, password: &str) -> Result<Joined, String> {
         let active = run(log, "nmcli", &["-t".into(), "-f".into(), "NAME,TYPE".into(), "con".into(), "show".into(), "--active".into()])?;
         let previous = active.lines().find(|l| l.ends_with(":802-11-wireless")).map(|l| l.trim_end_matches(":802-11-wireless").to_string());
-        run(log, "nmcli", &["dev".into(), "wifi".into(), "connect".into(), ssid.into(), "password".into(), password.into()])?;
+        run_hiding(
+            log,
+            "nmcli",
+            &["dev".into(), "wifi".into(), "connect".into(), ssid.into(), "password".into(), password.into()],
+            Some(password),
+        )?;
         Ok(Joined { ssid: ssid.into(), previous, device: None })
     }
 
@@ -232,6 +265,15 @@ mod tests {
         assert!(xml.contains("<name>Osmo&lt;&amp;&gt;</name>"));
         assert!(xml.contains("<keyMaterial>p&quot;a&apos;s</keyMaterial>"));
         assert!(xml.contains("<connectionMode>manual</connectionMode>"));
+    }
+
+    #[test]
+    fn password_never_reaches_the_log() {
+        let args: Vec<String> = ["-setairportnetwork", "en0", "OsmoAction5Pro-2DCA", "s3creto99"].map(String::from).into();
+        let line = command_line("networksetup", &args, Some("s3creto99"));
+        assert!(!line.contains("s3creto99") && line.contains("OsmoAction5Pro-2DCA"), "{line}");
+        assert_eq!(hide("Error: s3creto99 rechazada", Some("s3creto99")), "Error: <oculta, 9 caracteres> rechazada");
+        assert_eq!(command_line("netsh", &args, None), format!("$ netsh {}", args.join(" ")));
     }
 
     #[test]
