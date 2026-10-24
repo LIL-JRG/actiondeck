@@ -43,16 +43,19 @@ pub fn destination_for(library: &Path, source: &Path) -> PathBuf {
     library.join(day).join(source.file_name().unwrap_or_default())
 }
 
-enum Target {
+pub enum Target {
     Copy(PathBuf),
     AlreadyThere,
 }
 
-/// Si en la carpeta del día ya hay otro archivo con el mismo nombre pero otro
-/// tamaño (otra cámara, contador reiniciado), se copia como `nombre (2).ext`,
-/// `(3)`… en vez de sobrescribirlo. Un archivo del mismo tamaño ya está importado.
 fn target_for(library: &Path, source: &Path, size: u64) -> Target {
-    let first = destination_for(library, source);
+    target_at(destination_for(library, source), size)
+}
+
+/// Si en `first` ya hay otro archivo con el mismo nombre pero otro tamaño
+/// (otra cámara, contador reiniciado), se copia como `nombre (2).ext`, `(3)`…
+/// en vez de sobrescribirlo. Un archivo del mismo tamaño ya está importado.
+pub fn target_at(first: PathBuf, size: u64) -> Target {
     let stem = first.file_stem().unwrap_or_default().to_string_lossy().into_owned();
     let ext = first.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
     let mut n = 1;

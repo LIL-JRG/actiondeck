@@ -120,7 +120,22 @@ export const api = {
     }),
   cancelExport: () => invoke<boolean>("cancel_export"),
   nearbyCameras: () => invoke<Nearby>("nearby_cameras"),
+  /** Despierta la cámara, se une a su Wi-Fi y devuelve sus archivos. */
+  wirelessConnect: () => invoke<MediaFile[]>("wireless_connect"),
+  /** Descarga a la biblioteca y vuelve a la red anterior. */
+  wirelessImport: (paths: string[]) => invoke<ImportSummary>("wireless_import", { paths }),
+  wirelessDisconnect: () => invoke<void>("wireless_disconnect"),
 };
+
+/** Paso de la conexión por Wi-Fi ("" cuando no hay nada en curso). */
+export function onWirelessPhase(handler: (text: string) => void): Promise<UnlistenFn> {
+  return listen<string>("wireless-phase", (e) => handler(e.payload));
+}
+
+/** La app salió de la red de la cámara (al terminar o por inactividad). */
+export function onWirelessClosed(handler: () => void): Promise<UnlistenFn> {
+  return listen("wireless-closed", () => handler());
+}
 
 export function onNearbyCameras(handler: (n: Nearby) => void): Promise<UnlistenFn> {
   return listen<Nearby>("nearby-cameras", (e) => handler(e.payload));

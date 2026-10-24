@@ -166,6 +166,16 @@ pub struct Credentials {
     pub needed_approval: bool,
 }
 
+/// La trama para el registro, sin la contraseña del Wi-Fi (respuesta a `07/0E`).
+fn shown(frame: &Frame) -> String {
+    if frame.is(0x07, 0x0E) && frame.is_response() {
+        let hidden = Frame { payload: Vec::new(), ..frame.clone() };
+        format!("{hidden:?}<oculta, {} bytes>", frame.payload.len())
+    } else {
+        format!("{frame:?}")
+    }
+}
+
 /// Canal DUML sobre `fff5` (escritura) y `fff4`/`fff5` (notificaciones).
 struct Link {
     peripheral: Peripheral,
@@ -215,7 +225,7 @@ impl Link {
                 for result in reassembler.push(&note.value) {
                     match result {
                         Ok(frame) => {
-                            note_log.line(format!("<- {frame:?}"));
+                            note_log.line(format!("<- {}", shown(&frame)));
                             if tx.send(frame).is_err() {
                                 return;
                             }
@@ -406,6 +416,14 @@ mod tests {
         assert_eq!(advert.model_id, Some(0x0015));
         assert_eq!(model_name(0x0015), "Osmo Action 5 Pro");
         assert_eq!(advert.awake, Some(true));
+    }
+
+    #[test]
+    fn wifi_password_reply_is_hidden_in_the_log() {
+        let request = Frame::request(duml::addr::APP, duml::addr::WIFI, 1, 0x07, 0x0E, Vec::new());
+        let reply = request.reply(vec![0x00, 0x04, b'a', b'b', b'c', b'd']);
+        let line = shown(&reply);
+        assert!(!line.contains("61626364") && line.contains("<oculta, 6 bytes>"), "{line}");
     }
 
     #[test]

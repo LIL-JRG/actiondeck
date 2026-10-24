@@ -97,8 +97,10 @@ export default function App() {
       {arrived && (
         <div className="notice" role="status">
           <span>
-            <strong>{arrived.model}</strong> encendida ({arrived.name}). Para pasar sus videos, conéctala por USB-C o
-            mete la microSD; la transferencia por Wi-Fi llega en la siguiente etapa.
+            <strong>{arrived.model}</strong> encendida ({arrived.name}).{" "}
+            <button className="link inline" onClick={() => setTab("import")}>
+              Importar sus videos por Wi-Fi
+            </button>
           </span>
           <button className="icon" onClick={() => setArrived(null)} aria-label="Cerrar">
             ×
@@ -108,7 +110,13 @@ export default function App() {
 
       <main className="content">
         {tab === "import" && (
-          <ImportView libraryDir={settings.libraryDir} libraryFiles={library} onImported={refreshLibrary} onError={setError} />
+          <ImportView
+            libraryDir={settings.libraryDir}
+            libraryFiles={library}
+            nearby={nearby.cameras}
+            onImported={refreshLibrary}
+            onError={setError}
+          />
         )}
         {tab === "edit" && (
           <EditView settings={settings} library={library} timeline={timeline} setTimeline={setTimeline} onError={setError} />

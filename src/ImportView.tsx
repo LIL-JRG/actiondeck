@@ -4,23 +4,28 @@ import {
   api,
   errorText,
   onImportProgress,
+  onWirelessClosed,
+  onWirelessPhase,
   type CameraDrive,
   type ImportProgress,
   type ImportSummary,
   type MediaFile,
+  type NearbyCamera,
 } from "./api";
 import { formatBytes, formatDate } from "./format";
 
 type Props = {
   libraryDir: string;
   libraryFiles: MediaFile[];
+  /** Cámaras encendidas cerca: se pueden importar por Wi-Fi. */
+  nearby: NearbyCamera[];
   onImported: () => void;
   onError: (message: string) => void;
 };
 
-type Source = { label: string; path: string };
+type Source = { label: string; path: string; wireless?: boolean };
 
-export function ImportView({ libraryDir, libraryFiles, onImported, onError }: Props) {
+export function ImportView({ libraryDir, libraryFiles, nearby, onImported, onError }: Props) {
   const [drives, setDrives] = useState<CameraDrive[]>([]);
   const [source, setSource] = useState<Source | null>(null);
   const [files, setFiles] = useState<MediaFile[]>([]);
@@ -29,6 +34,16 @@ export function ImportView({ libraryDir, libraryFiles, onImported, onError }: Pr
   const [progress, setProgress] = useState<ImportProgress | null>(null);
   const [importing, setImporting] = useState(false);
   const [summary, setSummary] = useState<ImportSummary | null>(null);
+  // Por Wi-Fi: el paso en curso y si la computadora está en la red de la cámara.
+  const [phase, setPhase] = useState("");
+  const [onCameraWifi, setOnCameraWifi] = useState(false);
+
+  useEffect(() => {
+    const pending = [onWirelessPhase(setPhase), onWirelessClosed(() => setOnCameraWifi(false))];
+    return () => {
+      pending.forEach((p) => p.then((unlisten) => unlisten()));
+    };
+  }, []);
 
   // La cámara puede conectarse en cualquier momento: revisa las unidades cada 3 s.
   useEffect(() => {
@@ -79,6 +94,23 @@ export function ImportView({ libraryDir, libraryFiles, onImported, onError }: Pr
     [isImported, onError],
   );
 
+  const connectWireless = async (camera: NearbyCamera) => {
+    setSource({ label: camera.name, path: `wifi:${camera.id}`, wireless: true });
+    setSummary(null);
+    setFiles([]);
+    setScanning(true);
+    try {
+      const found = await api.wirelessConnect();
+      setOnCameraWifi(true);
+      setFiles(found);
+      setSelected(new Set(found.filter((f) => !isImported(f)).map((f) => f.path)));
+    } catch (e) {
+      onError(errorText(e));
+    } finally {
+      setScanning(false);
+    }
+  };
+
   const pickFolder = async () => {
     const path = await open({ directory: true, title: "Carpeta con videos de la cámara" });
     if (typeof path === "string") scan({ label: path, path });
@@ -100,7 +132,8 @@ export function ImportView({ libraryDir, libraryFiles, onImported, onError }: Pr
     setSummary(null);
     setProgress(null);
     try {
-      const result = await api.startImport(chosen.map((f) => f.path));
+      const paths = chosen.map((f) => f.path);
+      const result = source?.wireless ? await api.wirelessImport(paths) : await api.startImport(paths);
       setSummary(result);
       // Lo que ya se copió deja de estar seleccionado; solo queda lo que falló.
       const done = new Set([...result.copied, ...result.skipped]);
@@ -119,10 +152,27 @@ export function ImportView({ libraryDir, libraryFiles, onImported, onError }: Pr
     <div className="import-view">
       <aside className="panel sources">
         <h2>Origen</h2>
+        {nearby.length > 0 && (
+          <ul className="source-list">
+            {nearby.map((camera) => (
+              <li key={camera.id}>
+                <button
+                  className={source?.path === `wifi:${camera.id}` ? "source active" : "source"}
+                  onClick={() => connectWireless(camera)}
+                  disabled={scanning || importing}
+                >
+                  <span className="source-name">{camera.name}</span>
+                  <span className="source-meta">Por Wi-Fi · {camera.model}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
         {drives.length === 0 ? (
           <p className="hint">
-            Conecta la Osmo Action por USB-C (en la cámara, elige el modo de transferencia de archivos) o mete la
-            microSD en un lector. Aparecerá aquí sola.
+            {nearby.length > 0
+              ? "O conéctala por USB-C, o mete la microSD en un lector, para copiar más rápido."
+              : "Enciende la cámara para importar por Wi-Fi, o conéctala por USB-C (modo de transferencia de archivos) o mete la microSD en un lector. Aparecerá aquí sola."}
           </p>
         ) : (
           <ul className="source-list">
@@ -172,7 +222,18 @@ export function ImportView({ libraryDir, libraryFiles, onImported, onError }: Pr
           )}
         </header>
 
-        {scanning && <p className="hint">Buscando videos…</p>}
+        {source?.wireless && onCameraWifi && !importing && (
+          <div className="wifi-banner">
+            <span>
+              Conectado a la red de la cámara: la computadora no tiene internet por Wi-Fi mientras tanto. Se
+              desconecta sola al terminar de importar.
+            </span>
+            <button className="link" onClick={() => api.wirelessDisconnect()}>
+              Desconectar
+            </button>
+          </div>
+        )}
+        {scanning && <p className="hint">{source?.wireless ? phase || "Conectando…" : "Buscando videos…"}</p>}
         {!scanning && source && files.length === 0 && <p className="hint">No encontré videos ni fotos aquí.</p>}
         {!source && <p className="hint">Elige un origen a la izquierda.</p>}
 
@@ -204,6 +265,8 @@ export function ImportView({ libraryDir, libraryFiles, onImported, onError }: Pr
                 <div style={{ width: `${percent}%` }} />
               </div>
             </div>
+          ) : phase && !scanning ? (
+            <p className="hint">{phase}</p>
           ) : summary ? (
             <p className="hint">
               {summary.cancelled ? "Importación cancelada. " : "Listo. "}

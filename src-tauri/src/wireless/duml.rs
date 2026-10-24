@@ -235,6 +235,28 @@ impl Reassembler {
     }
 }
 
+/// Todas las tramas válidas dentro de `raw`, buscando byte por byte: por UDP
+/// llegan detrás de cabeceras propias y a veces varias en un datagrama.
+pub fn scan(raw: &[u8]) -> Vec<Frame> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + MIN_LEN <= raw.len() {
+        // Versión 1 en los bits altos del segundo byte de longitud.
+        if raw[i] == SOF && raw[i + 2] >> 2 == 1 {
+            let len = declared_len(&raw[i..]);
+            if len >= MIN_LEN && i + len <= raw.len() {
+                if let Ok(frame) = Frame::decode(&raw[i..i + len]) {
+                    out.push(frame);
+                    i += len;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
 /// Campo de texto DJI: `[len u8][utf8]`.
 pub fn pack_string(value: &str) -> Vec<u8> {
     let bytes = value.as_bytes();
@@ -321,6 +343,19 @@ mod tests {
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[1].seq, 2);
         assert_eq!(parse_status_string(&frames[1].payload), Some((0, "abc".into())));
+    }
+
+    #[test]
+    fn scans_frames_behind_udp_headers() {
+        let a = Frame::request(addr::CAMERA, addr::APP, 7, 0x02, 0x80, vec![1, 2, 3]).encode();
+        let b = Frame::request(addr::CAMERA, addr::APP, 8, 0x0D, 0x02, vec![]).encode();
+        let mut datagram = vec![0x55, 0x80, 0x12, 0x34, 0, 0, 0x01, 0x99]; // cabecera UDP con un 0x55
+        datagram.extend(&a);
+        datagram.extend([0u8; 12]);
+        datagram.extend(&b);
+        let frames = scan(&datagram);
+        assert_eq!(frames.len(), 2);
+        assert!(frames[0].is(0x02, 0x80) && frames[1].is(0x0D, 0x02));
     }
 
     #[test]

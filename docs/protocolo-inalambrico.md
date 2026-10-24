@@ -32,23 +32,30 @@ El identificador (32 caracteres) se genera una vez por instalación y se guarda 
 
 La cámara crea una red WPA2 y queda en `192.168.2.1`, repartiendo direcciones `192.168.2.x` ✅. Windows se une con un perfil manual de `netsh`, macOS con `networksetup` y Linux con `nmcli`.
 
-## 3. Listado de archivos (pendiente)
+## 3. Enlace de datos y lista de archivos (implementado en `wireless/datalink.rs` y `wireless/manifest.rs`)
 
-- Antes del enlace, un "poke": TCP `192.168.2.1:7001`, enviar la trama `07/45` con **el mismo texto de emparejamiento** que por Bluetooth, esperar 400 ms y cerrar ✅ (OS, VC).
-- Enlace UDP al puerto `9004` ✅, con cabecera propia de 8 bytes, handshake, acks cada 25 ms y retransmisión. Hay que registrarse como app y contestar las peticiones de la cámara, o da el enlace por perdido.
-- Modo reproducción `02/0C [01 01 00 01]`, esperar ~1.7 s y pedir páginas con `00/26`; la respuesta llega en trozos `00/27`. Cada archivo es un registro TLV con nombre, ruta, tamaño, fecha, duración y miniatura.
-- ❓ Pendiente de confirmar: el método de paginación, y si `storage` 0 es la microSD (casi todas las fuentes) o la memoria interna.
-- En archivos de más de 4 GB el tamaño del listado vale 0: hay que pedirlo con HEAD ✅ (VC).
+Probado el 2026-10-24 con una Action 5 Pro original (se identifica como `ac204` en su `00/81`):
 
-## 4. Descarga (pendiente)
+| Paso | Detalle | Estado |
+|---|---|---|
+| Poke | TCP `192.168.2.1:7001`: una trama `07/45` con **nuestro** identificador y texto de emparejamiento, esperar 400 ms y cerrar. | ✅ |
+| Puerto | UDP **9004**, el mismo puerto local. La Xtra Edge Pro (la misma cámara con otra marca) usa 10004 sin poke; se prueba después. Varias notas de osmosis que dicen "Action 5 Pro = 10004" se refieren a la Xtra. | ✅ 9004 |
+| Saludo | Tipo `00`, 40 bytes: base aleatoria múltiplo de 8 y la cola `64 00 64 00 c0 05 …` (38 bytes; la documentación de dji-vcam muestra un `00` de más). | ✅ ~2.4 s |
+| Secuencia | La nuestra empieza en el canal de la cámara + 8 y avanza de 8 en 8; el "ack" del enrutamiento es nuestra secuencia − 8. Confirmar lo recibido (tipo `04`) en cada tanda. | ✅ |
+| Registro | `00/81` (62 B, a `0x48`, flags `0x80`), `00/88` presencia (a `0x28`), `03/DA` y 8 suscripciones `00/99`. | ✅ |
+| Reproducción | `02/0C [01 01 00 01]` a la cámara; se confirma con el bit 30 de `02/80`. | ✅ al primer intento |
+| Lista | `00/26` (cursor 1, contador 1) → disparador → `00/26` (cursor `0x40000001`, contador 2). Respuestas `00/27`: el contador 1 es la microSD, el 2 la memoria interna. 45 por página; la siguiente se pide con el handle más viejo. | ✅ 13 + 2 archivos |
+| Registro de archivo | Orden: cabecera con la marca `ff 19 06`, ruta, miniatura, valores y nombre. Tamaño en T−14 (vale 0 si pasa de 4 GB), handle en T−10, duración en T−6, fecha FAT en T−18. Handles de la microSD desde `0x00040000`, de la interna desde `0x40040000`. | ✅ |
+| Estado | Batería en `0d/02` byte 20; microSD total y libre (MiB) en `02/DC` bytes 6 y 10, interna en 24 y 28. | ✅ |
 
-`GET http://192.168.2.1/v2?storage=<0|1>&path=DCIM/DJI_001/<nombre>.MP4`. El servidor es lighttpd, sin autenticación, y admite `Range` para reanudar ✅. Mientras dura la descarga hay que mantener vivo el enlace UDP, o la cámara apaga su red. La versión ligera `.LRF` se pide cambiando la extensión 🟡.
+## 4. Descarga (implementado en `wireless/download.rs`)
+
+`GET http://192.168.2.1/v2?storage=<0 microSD|1 interna>&path=DCIM/DJI_001/<nombre>.MP4`, con `Range` para reanudar. Para los archivos de más de 4 GB el tamaño se pide con `HEAD`. Mientras dura, el enlace UDP se mantiene con presencia y confirmación cada segundo. ✅ 243 MB a 68.7 MB/s; el video se decodificó completo.
 
 ## Plan de verificación con la cámara
 
 1. ✅ `actiondeck-diag buscar` y `vigilar`: aparece con el modelo `0x0015` y se detecta al encenderla y al apagarla.
-2. `actiondeck-diag emparejar`: ¿pide aceptar en pantalla y devuelve el nombre y la contraseña de la red?
-3. `actiondeck-diag wifi`: ¿la computadora se une a la red, la cámara responde en `192.168.2.1` y HTTP contesta?
-4. Listado por UDP y descarga (siguiente etapa).
+2. ✅ `actiondeck-diag emparejar`: pide aceptar en pantalla (unos 20 s; si no, responde `07/46 [02]`) y devuelve el nombre y la contraseña de la red. Las siguientes veces responde `00 01` sin preguntar.
+3. ✅ `actiondeck-diag listar --descargar`: despierta la cámara, se une a su red, lista, baja el video más chico y vuelve a la red anterior (internet de vuelta en ~6 s en macOS).
 
 Cada ejecución deja un registro con todas las tramas en `%APPDATA%\com.jorge.actiondeck\diag-logs` (Windows) o `~/Library/Application Support/com.jorge.actiondeck/diag-logs` (macOS).
