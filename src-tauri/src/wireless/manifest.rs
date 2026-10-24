@@ -25,6 +25,8 @@ pub struct MediaRecord {
     pub path: String,
     /// Nombre con extensión, p. ej. `DJI_20261024081500_0001_D.MP4`.
     pub name: String,
+    /// Miniatura en la cámara, p. ej. `MISC/THM/DJI_001/DJI_…_D`.
+    pub thumb: Option<String>,
     /// Identificador del archivo en la cámara; también sirve para paginar.
     pub handle: u32,
     /// Bytes; vale 0 en archivos de más de 4 GB (hay que pedirlo con HEAD).
@@ -108,7 +110,7 @@ fn fat_datetime(v: u32) -> Option<String> {
 /// Decodifica la lista ya reunida. Cada campo se busca solo entre el registro
 /// anterior y el siguiente, porque el orden de campos cambia de modelo a modelo.
 pub fn decode(buf: &[u8]) -> Vec<MediaRecord> {
-    let mut medias = Vec::new(); // (inicio, fin, ruta)
+    let mut medias: Vec<(usize, usize, String)> = Vec::new(); // (inicio, fin, ruta)
     let mut i = 0;
     while i < buf.len() {
         match read_path(buf, i, 1, b"DCIM/") {
@@ -121,7 +123,7 @@ pub fn decode(buf: &[u8]) -> Vec<MediaRecord> {
     }
 
     let mut files = Vec::new();
-    for (k, (pos, _, path)) in medias.iter().enumerate() {
+    for (k, (pos, end, path)) in medias.iter().enumerate() {
         let lo = if k > 0 { medias[k - 1].1 } else { 0 };
         let hi = medias.get(k + 1).map(|m| m.0).unwrap_or(buf.len());
         let base = path.rsplit('/').next().unwrap_or(path);
@@ -136,6 +138,9 @@ pub fn decode(buf: &[u8]) -> Vec<MediaRecord> {
             let field = buf.get(j + 2 + needle.len()..j + 2 + len)?;
             Some(String::from_utf8_lossy(field).to_ascii_uppercase())
         });
+
+        // Miniatura: justo después de la ruta en todos los modelos conocidos.
+        let thumb = (*end..hi).find_map(|t| read_path(buf, t, 2, b"MISC/")).map(|(v, _)| String::from_utf8_lossy(v).into_owned());
 
         // La marca `[fe|ff] 19 06` antes de la ruta; los demás campos cuelgan de ella.
         let marker = (lo.max(1)..pos.saturating_sub(1)).find(|&p| buf[p] == 0x19 && buf[p + 1] == 0x06 && matches!(buf[p - 1], 0xFE | 0xFF));
@@ -152,6 +157,7 @@ pub fn decode(buf: &[u8]) -> Vec<MediaRecord> {
         files.push(MediaRecord {
             path: path.clone(),
             name: ext.map(|e| format!("{base}.{e}")).unwrap_or_else(|| base.to_string()),
+            thumb,
             handle,
             size: u64::from(size),
             duration,
@@ -224,6 +230,7 @@ pub(crate) mod tests {
         assert_eq!((video.handle, video.size, video.duration), (0x0004_0020, 734_003_200, Some(95)));
         assert_eq!(video.recorded.as_deref(), Some("2026-10-24T08:15:30"));
         assert_eq!(video.storage, 0);
+        assert_eq!(video.thumb.as_deref(), Some("MISC/THM/DJI_001/DJI_20261024081530_0002_D"));
         assert!(video.is_video());
 
         let photo = &files[1];

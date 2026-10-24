@@ -163,6 +163,8 @@ struct Transport {
     counter: u8,
     peer_cursor: u16,
     status: CameraStatus,
+    /// Último datagrama recibido: la cámara manda decenas por segundo.
+    last_rx: Instant,
     log: Log,
 }
 
@@ -193,6 +195,7 @@ impl Transport {
                 Err(_) => break,
             };
             let d = &buf[..n];
+            self.last_rx = Instant::now();
             if n >= 8 && d[6] == PKT_HANDSHAKE {
                 handshake = true;
             }
@@ -305,6 +308,7 @@ impl Datalink {
             counter: 0,
             peer_cursor: 0,
             status: CameraStatus::default(),
+            last_rx: Instant::now(),
             log: log.clone(),
         };
         log.line(format!("Saludo UDP a {camera} (sesión {:04x}, base {base:04x})", t.session));
@@ -331,6 +335,11 @@ impl Datalink {
 
     fn with<T>(&self, f: impl FnOnce(&mut Transport) -> T) -> T {
         f(&mut self.transport.lock().unwrap())
+    }
+
+    /// ¿Sigue hablando la cámara? Si se apaga o se aleja, deja de mandar.
+    pub fn is_alive(&self) -> bool {
+        self.with(|t| t.last_rx.elapsed() < Duration::from_secs(8))
     }
 
     pub fn status(&self) -> CameraStatus {

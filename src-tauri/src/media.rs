@@ -23,6 +23,11 @@ pub struct MediaFile {
     /// Fecha de modificación en milisegundos desde 1970.
     pub modified_ms: i64,
     pub proxy_path: Option<String>,
+    /// Miniatura ya hecha. Por Wi-Fi es una ruta en la cámara (`0/MISC/THM/…`);
+    /// en carpetas locales, `None` (la interfaz la genera con ffmpeg).
+    pub thumb: Option<String>,
+    /// Segundos, cuando se saben sin analizar el archivo (por Wi-Fi).
+    pub duration: Option<f64>,
 }
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq)]
@@ -194,6 +199,8 @@ pub fn scan_folder(root: &Path) -> Result<Vec<MediaFile>, String> {
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0),
             proxy_path: None,
+            thumb: None,
+            duration: None,
         });
     });
     for file in &mut files {
