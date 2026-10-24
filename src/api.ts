@@ -73,8 +73,18 @@ export type TimelineItem = {
   outPoint: number;
   applyLut: boolean;
   hasAudio: boolean;
+  /** 1 = normal, 0.25 = cuatro veces más lento. */
+  speed: number;
+  /** 0 = sin sonido, 1 = original, 2 = el doble. */
+  volume: number;
+  /** Qué parte de la imagen queda al recortar (0 izquierda/arriba, 1 derecha/abajo). */
+  cropX: number;
+  cropY: number;
   info: ClipInfo;
 };
+
+/** Cómo cabe un clip en otro formato: recortando o con barras negras. */
+export type Fit = "crop" | "pad";
 
 export type Codec = "h264" | "hevc";
 export type Encoder = "cpu" | "nvenc" | "videotoolbox";
@@ -87,6 +97,7 @@ export type ExportSettings = {
   width: number;
   height: number;
   fps: number;
+  fit: Fit;
 };
 
 export type ExportProgress = { secondsDone: number; secondsTotal: number; speed: string | null };
@@ -114,12 +125,16 @@ export const api = {
   previewSource: (path: string, forceProxy = false) => invoke<string>("preview_source", { path, forceProxy }),
   startExport: (items: TimelineItem[], settings: ExportSettings) =>
     invoke<string>("start_export", {
-      items: items.map(({ path, inPoint, outPoint, applyLut, hasAudio }) => ({
+      items: items.map(({ path, inPoint, outPoint, applyLut, hasAudio, speed, volume, cropX, cropY }) => ({
         path,
         inPoint,
         outPoint,
         applyLut,
         hasAudio,
+        speed,
+        volume,
+        cropX,
+        cropY,
       })),
       settings,
     }),
