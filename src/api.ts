@@ -142,7 +142,7 @@ export const api = {
   nearbyCameras: () => invoke<Nearby>("nearby_cameras"),
   /** Despierta la cámara, se une a su Wi-Fi y devuelve sus archivos. */
   wirelessConnect: () => invoke<MediaFile[]>("wireless_connect"),
-  /** Descarga a la biblioteca y vuelve a la red anterior. */
+  /** Descarga a la biblioteca; la cámara sigue conectada hasta desconectar o quedar inactiva. */
   wirelessImport: (paths: string[]) => invoke<ImportSummary>("wireless_import", { paths }),
   wirelessDisconnect: () => invoke<void>("wireless_disconnect"),
 };

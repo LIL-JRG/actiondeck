@@ -12,7 +12,7 @@ Fase 1 (esta versión):
 Fase 2:
 
 - **Detectar la cámara** por Bluetooth en cuanto se enciende, como DJI Mimo.
-- **Importar por Wi-Fi**: la primera vez se acepta la conexión en la pantalla de la cámara; después basta con elegirla en Importar. La app se une a la red de la cámara, lista sus archivos, los descarga (unos 70 MB/s) y vuelve a la red anterior. Con un solo adaptador Wi-Fi, la computadora no tiene internet mientras tanto.
+- **Importar por Wi-Fi**: la primera vez se acepta la conexión en la pantalla de la cámara; después, al encenderla, la app la detecta sola y ofrece conectarse. Se une a la red de la cámara, muestra sus archivos con miniaturas y vista previa, y descarga los que elijas (unos 70 MB/s). Vuelve a la red anterior al desconectar o tras 2 minutos sin usarla. Con un solo adaptador Wi-Fi, la computadora no tiene internet mientras tanto.
 
 Fase siguiente: DJI Mic Mini 2 (fase 3).
 

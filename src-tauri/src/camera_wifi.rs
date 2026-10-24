@@ -159,7 +159,7 @@ impl CameraWifi {
         }
     }
 
-    /// Descarga `ids` a la biblioteca y sale de la red de la cámara.
+    /// Descarga `ids` a la biblioteca.
     pub async fn import(
         &self,
         app: &AppHandle,
@@ -177,7 +177,8 @@ impl CameraWifi {
         .await
         .map_err(|e| e.to_string());
         self.importing.store(false, Ordering::Relaxed);
-        self.disconnect(app).await;
+        // Sigue conectada para ver o bajar más; se desconecta sola si nadie la usa.
+        self.touch();
         result
     }
 
