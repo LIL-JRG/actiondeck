@@ -2,6 +2,7 @@ mod import;
 mod media;
 mod render;
 mod tools;
+pub mod wireless;
 
 use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
