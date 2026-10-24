@@ -10,6 +10,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use chrono::TimeZone;
+use tauri::http::{Request, Response};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::import::{self, ImportProgress, ImportSummary, Target};
@@ -60,14 +61,20 @@ fn recorded_local(r: &MediaRecord) -> Option<chrono::DateTime<chrono::Local>> {
     chrono::Local.from_local_datetime(&naive).single()
 }
 
+/// Para la interfaz. `thumb` y `proxy_path` son rutas en la cámara que se
+/// piden por el protocolo `camara://` (ver `serve`): la miniatura JPEG
+/// `.scr` y la versión ligera `.LRF` de cada video.
 fn as_media_file(r: &MediaRecord) -> MediaFile {
+    let base = r.path.as_str();
     MediaFile {
         path: id_of(r),
         name: r.name.clone(),
         kind: if r.is_video() { MediaKind::Video } else { MediaKind::Photo },
         size: r.size,
         modified_ms: recorded_local(r).map(|d| d.timestamp_millis()).unwrap_or(0),
-        proxy_path: None,
+        proxy_path: r.is_video().then(|| format!("{}/{base}.LRF", r.storage)),
+        thumb: r.thumb.as_ref().map(|t| format!("{}/{t}.scr", r.storage)),
+        duration: r.duration.map(f64::from),
     }
 }
 
@@ -139,6 +146,17 @@ impl CameraWifi {
         let session = guard.as_mut()?;
         session.last_used = Instant::now();
         Some(session.files.clone())
+    }
+
+    /// Como `touch`, sin copiar la lista: para cada petición de vista previa.
+    fn keep_alive(&self) -> bool {
+        match self.session.lock().unwrap().as_mut() {
+            Some(session) => {
+                session.last_used = Instant::now();
+                true
+            }
+            None => false,
+        }
     }
 
     /// Descarga `ids` a la biblioteca y sale de la red de la cámara.
@@ -233,7 +251,8 @@ fn close_session(session: Session) {
     wifi::wait_internet(&log, Duration::from_secs(30));
 }
 
-/// Sale de la red de la cámara si nadie la usa durante `IDLE`.
+/// Sale de la red de la cámara si nadie la usa durante `IDLE` o si la
+/// cámara deja de contestar (se apagó o se alejó).
 fn watch_idle(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
@@ -242,7 +261,9 @@ fn watch_idle(app: AppHandle) {
             let wifi = &state.camera_wifi;
             let idle = match wifi.session.lock().unwrap().as_ref() {
                 None => return,
-                Some(s) => s.last_used.elapsed() > IDLE && !wifi.importing.load(Ordering::Relaxed),
+                Some(s) => {
+                    (s.last_used.elapsed() > IDLE && !wifi.importing.load(Ordering::Relaxed)) || !s.link.is_alive()
+                }
             };
             if idle {
                 wifi.disconnect(&app).await;
@@ -313,6 +334,98 @@ fn download_all(
     summary
 }
 
+/// Tope por respuesta: el reproductor pide el resto en otras peticiones.
+const SERVE_CHUNK: u64 = 2 * 1024 * 1024;
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes.get(i + 1..i + 3).and_then(|h| std::str::from_utf8(h).ok()).and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (bytes[i], hex) {
+            (b'%', Some(b)) => {
+                out.push(b);
+                i += 3;
+            }
+            (b, _) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// `bytes=a-b`, `bytes=a-` o `bytes=-n` acotado a `SERVE_CHUNK`, listo para
+/// pedírselo a la cámara.
+fn bounded_range(header: Option<&str>) -> String {
+    let spec = header.and_then(|h| h.trim().strip_prefix("bytes=")).and_then(|r| r.split(',').next());
+    let Some((a, b)) = spec.and_then(|r| r.trim().split_once('-')) else {
+        return format!("bytes=0-{}", SERVE_CHUNK - 1);
+    };
+    match (a.parse::<u64>().ok(), b.parse::<u64>().ok()) {
+        (Some(start), end) => {
+            let last = start + SERVE_CHUNK - 1;
+            format!("bytes={start}-{}", end.map_or(last, |e| e.min(last)))
+        }
+        (None, Some(suffix)) => format!("bytes=-{}", suffix.min(SERVE_CHUNK)),
+        (None, None) => format!("bytes=0-{}", SERVE_CHUNK - 1),
+    }
+}
+
+/// Protocolo `camara://localhost/<storage>/<ruta>`: miniaturas y vistas
+/// previas directo de la cámara mientras la app está en su red. Pasa los
+/// `Range` del reproductor a la cámara, que los admite, para saltar a
+/// cualquier punto sin descargar el video.
+pub fn serve(app: &AppHandle, request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
+    let plain = |status: u16, text: &str| {
+        Response::builder().status(status).header("Content-Type", "text/plain").body(text.as_bytes().to_vec()).unwrap()
+    };
+    if !app.state::<crate::AppState>().camera_wifi.keep_alive() {
+        return plain(503, "Sin conexión con la cámara");
+    }
+    let decoded = percent_decode(request.uri().path().trim_start_matches('/'));
+    let Some((storage, path)) = decoded.split_once('/') else { return plain(400, "Ruta inválida") };
+    let Ok(storage) = storage.parse::<u8>() else { return plain(400, "Ruta inválida") };
+    if !(path.starts_with("DCIM/") || path.starts_with("MISC/")) || path.contains("..") {
+        return plain(403, "Ruta no permitida");
+    }
+    let asked = request.headers().get("range").and_then(|v| v.to_str().ok());
+    let range = bounded_range(asked);
+    let response = match download::agent().get(&download::url(storage, path)).header("Range", &range).call() {
+        Ok(r) => r,
+        Err(e) => return plain(502, &e.to_string()),
+    };
+    let status = response.status().as_u16();
+    if status != 200 && status != 206 {
+        return plain(status, "La cámara no tiene ese archivo");
+    }
+    let content_range = response.headers().get("content-range").and_then(|v| v.to_str().ok()).map(String::from);
+    let mut body = Vec::new();
+    use std::io::Read as _;
+    if let Err(e) = response.into_body().into_reader().take(SERVE_CHUNK).read_to_end(&mut body) {
+        return plain(502, &e.to_string());
+    }
+    let lower = path.to_ascii_lowercase();
+    let kind = if lower.ends_with(".scr") || lower.ends_with(".jpg") { "image/jpeg" } else { "video/mp4" };
+    let total = content_range.as_deref().and_then(|c| c.rsplit('/').next()).and_then(|t| t.parse::<u64>().ok());
+    // Una petición sin Range que cupo entera se contesta como 200.
+    let whole = asked.is_none() && total.is_none_or(|t| t == body.len() as u64);
+    let mut builder = Response::builder()
+        .status(if whole { 200 } else { 206 })
+        .header("Content-Type", kind)
+        .header("Accept-Ranges", "bytes")
+        .header("Access-Control-Allow-Origin", "*")
+        .header("Content-Length", body.len().to_string());
+    if !whole {
+        if let Some(c) = &content_range {
+            builder = builder.header("Content-Range", c);
+        }
+    }
+    builder.body(body).unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,12 +434,33 @@ mod tests {
         MediaRecord {
             path: format!("DCIM/DJI_001/{}", name.rsplit_once('.').unwrap().0),
             name: name.into(),
+            thumb: None,
             handle: 0x0004_0010,
             size: 10,
             duration: Some(16),
             recorded: recorded.map(String::from),
             storage: 0,
         }
+    }
+
+    #[test]
+    fn player_ranges_are_capped_for_the_camera() {
+        assert_eq!(bounded_range(Some("bytes=0-1")), "bytes=0-1");
+        assert_eq!(bounded_range(Some("bytes=100-")), format!("bytes=100-{}", 100 + SERVE_CHUNK - 1));
+        assert_eq!(bounded_range(Some("bytes=0-99999999")), format!("bytes=0-{}", SERVE_CHUNK - 1));
+        assert_eq!(bounded_range(Some("bytes=-500")), "bytes=-500");
+        assert_eq!(bounded_range(None), format!("bytes=0-{}", SERVE_CHUNK - 1));
+        assert_eq!(percent_decode("0%2FDCIM%2FDJI_001%2FA%20B.LRF"), "0/DCIM/DJI_001/A B.LRF");
+    }
+
+    #[test]
+    fn camera_files_carry_their_thumbnail_and_preview() {
+        let mut r = record("DJI_20261017203926_0043_D.MP4", Some("2026-10-17T20:39:26"));
+        r.thumb = Some("MISC/THM/DJI_001/DJI_20261017203926_0043_D".into());
+        let file = as_media_file(&r);
+        assert_eq!(file.thumb.as_deref(), Some("0/MISC/THM/DJI_001/DJI_20261017203926_0043_D.scr"));
+        assert_eq!(file.proxy_path.as_deref(), Some("0/DCIM/DJI_001/DJI_20261017203926_0043_D.LRF"));
+        assert_eq!(file.duration, Some(16.0));
     }
 
     #[test]

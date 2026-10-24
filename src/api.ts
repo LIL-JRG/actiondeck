@@ -7,7 +7,12 @@ export type MediaFile = {
   kind: "video" | "photo";
   size: number;
   modifiedMs: number;
+  /** Versión ligera para la vista previa: un `.LRF` local o, por Wi-Fi, su ruta en la cámara. */
   proxyPath: string | null;
+  /** Por Wi-Fi: ruta de la miniatura en la cámara. */
+  thumb: string | null;
+  /** Segundos, cuando se saben sin analizar el archivo (por Wi-Fi). */
+  duration: number | null;
 };
 
 export type ClipInfo = {
@@ -153,6 +158,11 @@ export function onExportProgress(handler: (p: ExportProgress) => void): Promise<
 export function fileUrl(path: string, bust?: number): string {
   const url = convertFileSrc(path);
   return bust ? `${url}?v=${bust}` : url;
+}
+
+/** URL de un archivo de la cámara (`0/DCIM/…`) mientras la app está en su red. */
+export function cameraUrl(remotePath: string): string {
+  return convertFileSrc(remotePath, "camara");
 }
 
 /** Une partes de una ruta con el separador que ya usa `base` (\ o /). */

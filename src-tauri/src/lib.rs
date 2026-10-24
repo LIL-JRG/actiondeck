@@ -331,6 +331,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // Miniaturas y vistas previas de la cámara por Wi-Fi (camera_wifi::serve).
+        .register_asynchronous_uri_scheme_protocol("camara", |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            std::thread::spawn(move || responder.respond(camera_wifi::serve(&app, &request)));
+        })
         .setup(|app| {
             let paths = app.path();
             let settings_path = paths.app_config_dir()?.join("settings.json");

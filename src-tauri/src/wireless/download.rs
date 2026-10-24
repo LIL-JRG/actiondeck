@@ -16,7 +16,7 @@ use super::wifi::CAMERA_IP;
 
 const RETRIES: u32 = 6;
 
-fn agent() -> ureq::Agent {
+pub fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_connect(Some(Duration::from_secs(5)))
         .timeout_recv_response(Some(Duration::from_secs(15)))

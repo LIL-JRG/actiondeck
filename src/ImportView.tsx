@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   api,
@@ -12,7 +12,8 @@ import {
   type MediaFile,
   type NearbyCamera,
 } from "./api";
-import { formatBytes, formatDate } from "./format";
+import { formatBytes } from "./format";
+import { MediaGrid, MediaList, PreviewModal, useViewMode, ViewToggle } from "./MediaBrowser";
 
 type Props = {
   libraryDir: string;
@@ -37,9 +38,25 @@ export function ImportView({ libraryDir, libraryFiles, nearby, onImported, onErr
   // Por Wi-Fi: el paso en curso y si la computadora está en la red de la cámara.
   const [phase, setPhase] = useState("");
   const [onCameraWifi, setOnCameraWifi] = useState(false);
+  const [view, setView] = useViewMode();
+  const [previewing, setPreviewing] = useState<number | null>(null);
 
+  // Al salir de la red de la cámara (desconectar, apagarla, terminar de
+  // importar) sus archivos ya no se pueden ver ni bajar: el panel vuelve a
+  // su estado inicial. El resumen de la importación sigue a la vista.
+  const sourceRef = useRef(source);
+  sourceRef.current = source;
   useEffect(() => {
-    const pending = [onWirelessPhase(setPhase), onWirelessClosed(() => setOnCameraWifi(false))];
+    const closed = () => {
+      setOnCameraWifi(false);
+      if (sourceRef.current?.wireless) {
+        setSource(null);
+        setFiles([]);
+        setSelected(new Set());
+        setPreviewing(null);
+      }
+    };
+    const pending = [onWirelessPhase(setPhase), onWirelessClosed(closed)];
     return () => {
       pending.forEach((p) => p.then((unlisten) => unlisten()));
     };
@@ -77,13 +94,15 @@ export function ImportView({ libraryDir, libraryFiles, nearby, onImported, onErr
 
   const scan = useCallback(
     async (next: Source) => {
+      setPreviewing(null);
       setSource(next);
       setSummary(null);
       setScanning(true);
       try {
         const found = await api.scanFolder(next.path);
         setFiles(found);
-        setSelected(new Set(found.filter((f) => !isImported(f)).map((f) => f.path)));
+        // Nada seleccionado: el usuario elige qué importar.
+        setSelected(new Set());
       } catch (e) {
         onError(errorText(e));
         setFiles([]);
@@ -91,10 +110,11 @@ export function ImportView({ libraryDir, libraryFiles, nearby, onImported, onErr
         setScanning(false);
       }
     },
-    [isImported, onError],
+    [onError],
   );
 
   const connectWireless = async (camera: NearbyCamera) => {
+    setPreviewing(null);
     setSource({ label: camera.name, path: `wifi:${camera.id}`, wireless: true });
     setSummary(null);
     setFiles([]);
@@ -103,9 +123,10 @@ export function ImportView({ libraryDir, libraryFiles, nearby, onImported, onErr
       const found = await api.wirelessConnect();
       setOnCameraWifi(true);
       setFiles(found);
-      setSelected(new Set(found.filter((f) => !isImported(f)).map((f) => f.path)));
+      setSelected(new Set());
     } catch (e) {
       onError(errorText(e));
+      setSource(null);
     } finally {
       setScanning(false);
     }
@@ -209,6 +230,7 @@ export function ImportView({ libraryDir, libraryFiles, nearby, onImported, onErr
           </div>
           {files.length > 0 && (
             <div className="row">
+              <ViewToggle mode={view} onChange={setView} />
               <button className="link" onClick={() => setSelected(new Set(files.map((f) => f.path)))}>
                 Todos
               </button>
@@ -237,18 +259,40 @@ export function ImportView({ libraryDir, libraryFiles, nearby, onImported, onErr
         {!scanning && source && files.length === 0 && <p className="hint">No encontré videos ni fotos aquí.</p>}
         {!source && <p className="hint">Elige un origen a la izquierda.</p>}
 
-        <ul className="file-list">
-          {files.map((f) => (
-            <li key={f.path} className={selected.has(f.path) ? "file selected" : "file"} onClick={() => toggle(f.path)}>
-              <input type="checkbox" checked={selected.has(f.path)} readOnly tabIndex={-1} />
-              <span className="file-name">{f.name}</span>
-              <span className="badge">{f.kind === "video" ? "Video" : "Foto"}</span>
-              {isImported(f) && <span className="badge done">Importado</span>}
-              <span className="file-meta">{formatDate(f.modifiedMs)}</span>
-              <span className="file-meta right">{formatBytes(f.size)}</span>
-            </li>
+        {files.length > 0 &&
+          (view === "grid" ? (
+            <MediaGrid
+              files={files}
+              wireless={!!source?.wireless}
+              selected={selected}
+              isImported={isImported}
+              onToggle={toggle}
+              onPreview={setPreviewing}
+            />
+          ) : (
+            <MediaList
+              files={files}
+              wireless={!!source?.wireless}
+              selected={selected}
+              isImported={isImported}
+              onToggle={toggle}
+              onPreview={setPreviewing}
+            />
           ))}
-        </ul>
+        {files.length === 0 && <div className="files-spacer" />}
+
+        {previewing !== null && files[previewing] && (
+          <PreviewModal
+            files={files}
+            index={previewing}
+            wireless={!!source?.wireless}
+            selected={selected}
+            isImported={isImported}
+            onToggle={toggle}
+            onMove={setPreviewing}
+            onClose={() => setPreviewing(null)}
+          />
+        )}
 
         <footer className="files-footer">
           {importing && progress ? (

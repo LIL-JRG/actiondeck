@@ -216,14 +216,50 @@ fn en_la_camara(log: &Log, identifier: &str, token: &str, descargar: bool) -> Re
                 f.recorded.as_deref().unwrap_or("?"),
             ));
         }
+        link.start_keepalive();
+        sondear_vistas_previas(log, &files);
         if descargar {
-            link.start_keepalive();
             bajar_el_mas_chico(log, &files)?;
         }
         Ok(())
     });
     link.close();
     outcome
+}
+
+/// Qué ruta tienen las miniaturas y si hay versiones ligeras `.LRF`.
+fn sondear_vistas_previas(log: &Log, files: &[MediaRecord]) {
+    for f in files.iter().filter(|f| f.is_video()).take(3).chain(files.iter().filter(|f| !f.is_video()).take(1)) {
+        log.line(format!("Sonda {}: miniatura {:?}", f.name, f.thumb));
+        let base = f.file_path().rsplit_once('.').map(|(b, _)| b.to_string()).unwrap_or_default();
+        for ext in ["LRF", "lrf", "XRF"] {
+            log.line(format!("  HEAD {base}.{ext}: {:?}", download::head_size(f.storage, &format!("{base}.{ext}"))));
+        }
+        let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).build().into();
+        if let Ok(r) = agent.get(&download::url(f.storage, &format!("{base}.LRF"))).header("Range", "bytes=100-199").call() {
+            let range = r.headers().get("content-range").and_then(|v| v.to_str().ok()).map(String::from);
+            let kind = r.headers().get("content-type").and_then(|v| v.to_str().ok()).map(String::from);
+            log.line(format!("  GET Range LRF: HTTP {} · content-range {range:?} · tipo {kind:?}", r.status()));
+        }
+        let Some(thumb) = &f.thumb else { continue };
+        for candidate in [thumb.clone(), format!("{thumb}.scr"), format!("{thumb}.SCR"), format!("{thumb}.jpg"), format!("{thumb}.THM")] {
+            let size = download::head_size(f.storage, &candidate);
+            log.line(format!("  HEAD {candidate}: {size:?}"));
+            if size.is_some() {
+                let dest = config::config_dir().join("diag-descargas").join(format!("{}.miniatura", f.name));
+                let cancel = std::sync::atomic::AtomicBool::new(false);
+                if let Ok(Some(_)) = download::download(f.storage, &candidate, &dest, size, &cancel, |_, _| {}) {
+                    let head: Vec<u8> = std::fs::read(&dest).unwrap_or_default().into_iter().take(4).collect();
+                    log.line(format!("  guardada en {} · empieza con {}", dest.display(), duml_hex(&head)));
+                }
+                break;
+            }
+        }
+    }
+}
+
+fn duml_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn bajar_el_mas_chico(log: &Log, files: &[MediaRecord]) -> Result<(), String> {
