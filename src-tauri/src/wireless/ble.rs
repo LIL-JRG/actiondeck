@@ -49,6 +49,19 @@ pub fn model_name(id: u16) -> &'static str {
     }
 }
 
+const KNOWN_MODELS: [u16; 11] = [0x0006, 0x0010, 0x0012, 0x0014, 0x0015, 0x0017, 0x0018, 0x0019, 0x0020, 0x0021, 0x0022];
+
+/// Modelo según el nombre anunciado (`OsmoAction5Pro675D`), para cuando aún
+/// no llegan los datos del fabricante. Gana el más largo: "Osmo Action 5 Pro"
+/// y no "Osmo Action".
+pub fn model_from_name(name: &str) -> Option<&'static str> {
+    KNOWN_MODELS
+        .iter()
+        .map(|&id| model_name(id))
+        .filter(|model| name.starts_with(&model.replace(' ', "")))
+        .max_by_key(|model| model.len())
+}
+
 #[derive(Clone, Debug)]
 pub struct Advert {
     pub model_id: Option<u16>,
@@ -68,6 +81,11 @@ pub fn parse_advert(manufacturer: &std::collections::HashMap<u16, Vec<u8>>) -> O
         _ => None,
     };
     Some(Advert { model_id, awake, raw })
+}
+
+/// Por datos del fabricante o, si no los anuncia, por el nombre.
+pub fn looks_dji(name: &str, advert: Option<&Advert>) -> bool {
+    advert.is_some() || name.starts_with("Osmo") || name.starts_with("DJI")
 }
 
 #[derive(Clone)]
@@ -115,13 +133,19 @@ pub async fn scan(log: &Log, duration: Duration) -> Result<Vec<FoundCamera>, Str
     sleep(duration).await;
     let _ = central.stop_scan().await;
 
+    // Sin permiso de Bluetooth, macOS no da error: solo no ve nada.
+    let state = central.adapter_state().await.map(|s| format!("{s:?}")).unwrap_or_else(|e| e.to_string());
+    let peripherals = central.peripherals().await.map_err(|e| e.to_string())?;
+    log.line(format!("Estado del Bluetooth: {state} · {} dispositivos a la vista", peripherals.len()));
+
     let mut found = Vec::new();
-    for peripheral in central.peripherals().await.map_err(|e| e.to_string())? {
+    for peripheral in peripherals {
         let Ok(Some(props)) = peripheral.properties().await else { continue };
         let advert = parse_advert(&props.manufacturer_data);
         let name = props.local_name.or(props.advertisement_name).unwrap_or_default();
-        let looks_dji = advert.is_some() || name.starts_with("Osmo") || name.starts_with("DJI");
-        if !looks_dji {
+        if !looks_dji(&name, advert.as_ref()) {
+            let ids: Vec<String> = props.manufacturer_data.keys().map(|id| format!("{id:04x}")).collect();
+            log.line(format!("  otro: {} · fabricante [{}]", if name.is_empty() { "(sin nombre)" } else { &name }, ids.join(" ")));
             continue;
         }
         let model = advert.as_ref().and_then(|a| a.model_id).map(model_name).unwrap_or("Modelo no anunciado");
@@ -382,6 +406,14 @@ mod tests {
         assert_eq!(advert.model_id, Some(0x0015));
         assert_eq!(model_name(0x0015), "Osmo Action 5 Pro");
         assert_eq!(advert.awake, Some(true));
+    }
+
+    #[test]
+    fn model_from_advertised_name() {
+        assert_eq!(model_from_name("OsmoAction5Pro675D"), Some("Osmo Action 5 Pro"));
+        assert_eq!(model_from_name("OsmoAction-1234"), Some("Osmo Action"));
+        assert_eq!(model_from_name("OsmoPocket4Pro-AB12"), Some("Osmo Pocket 4 Pro"));
+        assert_eq!(model_from_name("iPhone"), None);
     }
 
     #[test]

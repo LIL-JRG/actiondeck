@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! actiondeck-diag buscar [segundos]        busca cámaras DJI por Bluetooth
+//! actiondeck-diag vigilar [segundos]       avisa cuando una cámara se enciende o se apaga
 //! actiondeck-diag emparejar [nombre]       empareja y pide el Wi-Fi de la cámara
 //! actiondeck-diag wifi [nombre] [--quedarse]
 //!                                         se une al Wi-Fi de la cámara y prueba HTTP
@@ -18,10 +19,10 @@ use actiondeck_lib::wireless::{
     ble,
     config::{self, KnownCamera, WirelessConfig},
     log::{redact, Log},
-    wifi,
+    watch, wifi,
 };
 
-const USAGE: &str = "Uso: actiondeck-diag <buscar|emparejar|wifi|http|info> [argumentos] [--sin-despertar] [--mostrar-contrasena] [--quedarse]";
+const USAGE: &str = "Uso: actiondeck-diag <buscar|vigilar|emparejar|wifi|http|info> [argumentos] [--sin-despertar] [--mostrar-contrasena] [--quedarse]";
 
 #[tokio::main]
 async fn main() {
@@ -39,6 +40,7 @@ async fn main() {
 
     let result = match command {
         "buscar" => buscar(&log, arg).await,
+        "vigilar" => vigilar(&log, arg).await,
         "emparejar" => emparejar(&log, arg, !flag("--sin-despertar"), flag("--mostrar-contrasena")).await,
         "wifi" => conectar_wifi(&log, arg, flag("--quedarse")),
         "http" => probar_http(&log, arg.unwrap_or("/")),
@@ -68,6 +70,21 @@ async fn buscar(log: &Log, seconds: Option<&str>) -> Result<(), String> {
         return Err("No encontré cámaras. Enciéndela, acércala y cierra DJI Mimo en el teléfono.".into());
     }
     log.line(format!("{} cámara(s) encontradas", found.len()));
+    Ok(())
+}
+
+async fn vigilar(log: &Log, seconds: Option<&str>) -> Result<(), String> {
+    let secs = seconds.and_then(|s| s.parse().ok()).unwrap_or(120);
+    log.line(format!("Vigilando durante {secs} s: enciende y apaga la cámara…"));
+    let watcher = watch::watch(|nearby| match &nearby.bluetooth_error {
+        Some(e) => log.line(format!("Bluetooth: {e}")),
+        None if nearby.cameras.is_empty() => log.line("Ninguna cámara encendida cerca"),
+        None => {
+            let names: Vec<String> = nearby.cameras.iter().map(|c| format!("{} ({})", c.name, c.model)).collect();
+            log.line(format!("Cerca: {}", names.join(", ")))
+        }
+    });
+    let _ = tokio::time::timeout(Duration::from_secs(secs), watcher).await;
     Ok(())
 }
 

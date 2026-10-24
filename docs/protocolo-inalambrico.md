@@ -14,7 +14,8 @@ Marcas: ✅ probado con un Action 5 Pro por alguna fuente · 🟡 documentado pa
 
 | Paso | Detalle | Estado |
 |---|---|---|
-| Anuncio | ID de empresa DJI `0x08AA` (también `0xF7AA`, `0xE5C0`); los dos primeros bytes son el modelo, el Action 5 Pro es `0x0015`. El nombre es `OsmoAction5Pro-XXXX`. | ✅ modelo · 🟡 nombre |
+| Anuncio | ID de empresa DJI `0x08AA` (también `0xF7AA`, `0xE5C0`); los dos primeros bytes son el modelo, el Action 5 Pro es `0x0015`. Nuestra cámara anuncia `OsmoAction5Pro675D` (sin guion) y los datos `15 00 fa 88 29 85 cc 67 5e 00`: el tercer byte es `fa`, no `40`, y el byte de despierta/dormida vale `00`, así que no sirve. | ✅ (probado 2026-10-24) |
+| Detección | Apagada no se anuncia. Encendida, se anuncia sin parar: aparece en menos de 1 s y, sin anuncios durante 12 s, se da por apagada (`wireless/watch.rs`). El primer anuncio puede traer solo el nombre; el modelo se deduce de él. | ✅ (probado 2026-10-24) |
 | GATT | Servicio `fff0`. Se escribe en `fff5` sin confirmación y se recibe en `fff4` y `fff5`. | ✅ |
 | Preparar | Suscribirse a `fff4` y `fff5`, escribir `01 00` en el valor de `fff4` con confirmación y esperar ~200 ms. Sin esto la cámara no contesta. | 🟡 |
 | MTU | 500; con 517 la cámara deja de responder (OS). btleplug no permite elegirla: la negocia el sistema. | ❓ |
@@ -45,7 +46,7 @@ La cámara crea una red WPA2 y queda en `192.168.2.1`, repartiendo direcciones `
 
 ## Plan de verificación con la cámara
 
-1. `actiondeck-diag buscar`: ¿aparece el Action 5 Pro con el modelo `0x0015`?
+1. ✅ `actiondeck-diag buscar` y `vigilar`: aparece con el modelo `0x0015` y se detecta al encenderla y al apagarla.
 2. `actiondeck-diag emparejar`: ¿pide aceptar en pantalla y devuelve el nombre y la contraseña de la red?
 3. `actiondeck-diag wifi`: ¿la computadora se une a la red, la cámara responde en `192.168.2.1` y HTTP contesta?
 4. Listado por UDP y descarga (siguiente etapa).

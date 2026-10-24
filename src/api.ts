@@ -86,6 +86,11 @@ export type ExportSettings = {
 
 export type ExportProgress = { secondsDone: number; secondsTotal: number; speed: string | null };
 
+export type NearbyCamera = { id: string; name: string; model: string };
+
+/** Cámaras encendidas cerca, detectadas por Bluetooth. */
+export type Nearby = { bluetoothError: string | null; cameras: NearbyCamera[] };
+
 export const api = {
   getSettings: () => invoke<Settings>("get_settings"),
   setLibraryDir: (path: string) => invoke<Settings>("set_library_dir", { path }),
@@ -114,7 +119,12 @@ export const api = {
       settings,
     }),
   cancelExport: () => invoke<boolean>("cancel_export"),
+  nearbyCameras: () => invoke<Nearby>("nearby_cameras"),
 };
+
+export function onNearbyCameras(handler: (n: Nearby) => void): Promise<UnlistenFn> {
+  return listen<Nearby>("nearby-cameras", (e) => handler(e.payload));
+}
 
 export function onImportProgress(handler: (p: ImportProgress) => void): Promise<UnlistenFn> {
   return listen<ImportProgress>("import-progress", (e) => handler(e.payload));

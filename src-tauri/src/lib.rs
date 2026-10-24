@@ -14,6 +14,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use media::{CameraDrive, ClipInfo, MediaFile};
 use render::{Encoder, ExportSettings, RunningExport, TimelineItem};
 use tools::Tools;
+use wireless::watch::Nearby;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase", default)]
@@ -33,6 +34,8 @@ struct AppState {
     export: RunningExport,
     /// Resultado de probar el codificador de hardware; se borra al cambiar de ffmpeg.
     hardware: Mutex<Option<tools::Hardware>>,
+    /// Cámaras encendidas cerca, según la detección por Bluetooth.
+    nearby: Mutex<Nearby>,
 }
 
 impl AppState {
@@ -295,6 +298,11 @@ async fn start_export(
 }
 
 #[tauri::command]
+fn nearby_cameras(state: State<'_, AppState>) -> Nearby {
+    state.nearby.lock().unwrap().clone()
+}
+
+#[tauri::command]
 fn cancel_export(state: State<'_, AppState>) -> bool {
     render::cancel_export(&state.export)
 }
@@ -329,7 +337,15 @@ pub fn run() {
                 import_cancel: AtomicBool::new(false),
                 export: RunningExport::default(),
                 hardware: Mutex::new(None),
+                nearby: Mutex::new(Nearby::default()),
             });
+
+            // Como Mimo: detecta la cámara en cuanto se enciende.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(wireless::watch::watch(move |nearby| {
+                *handle.state::<AppState>().nearby.lock().unwrap() = nearby.clone();
+                let _ = handle.emit("nearby-cameras", nearby);
+            }));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -349,6 +365,7 @@ pub fn run() {
             preview_source,
             start_export,
             cancel_export,
+            nearby_cameras,
         ])
         .run(tauri::generate_context!())
         .expect("error al iniciar ActionDeck");

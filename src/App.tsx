@@ -1,5 +1,14 @@
-import { useCallback, useEffect, useState } from "react";
-import { api, errorText, type MediaFile, type Settings, type TimelineItem } from "./api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  api,
+  errorText,
+  onNearbyCameras,
+  type MediaFile,
+  type Nearby,
+  type NearbyCamera,
+  type Settings,
+  type TimelineItem,
+} from "./api";
 import { EditView } from "./EditView";
 import { ImportView } from "./ImportView";
 import { SettingsView } from "./SettingsView";
@@ -20,6 +29,25 @@ export default function App() {
   // La línea de tiempo vive aquí para no perderse al cambiar de pestaña.
   const [timeline, setTimeline] = useState<TimelineItem[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [nearby, setNearby] = useState<Nearby>({ bluetoothError: null, cameras: [] });
+  // Aviso de la cámara que se acaba de encender, como el de Mimo.
+  const [arrived, setArrived] = useState<NearbyCamera | null>(null);
+  const known = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    const update = (next: Nearby) => {
+      const fresh = next.cameras.find((c) => !known.current.has(c.id));
+      known.current = new Set(next.cameras.map((c) => c.id));
+      setNearby(next);
+      // Si la cámara del aviso sigue cerca, se muestran sus datos más recientes.
+      setArrived((shown) => fresh ?? next.cameras.find((c) => c.id === shown?.id) ?? null);
+    };
+    api.nearbyCameras().then(update).catch(() => {});
+    const pending = onNearbyCameras(update);
+    return () => {
+      pending.then((unlisten) => unlisten());
+    };
+  }, []);
 
   const refreshLibrary = useCallback(() => {
     api.libraryFiles().then(setLibrary).catch((e) => setError(errorText(e)));
@@ -49,6 +77,7 @@ export default function App() {
             </button>
           ))}
         </nav>
+        <CameraStatus nearby={nearby} />
         {!settings.lutName && (
           <button className="link" onClick={() => setTab("settings")}>
             Falta elegir la LUT
@@ -65,6 +94,18 @@ export default function App() {
         </div>
       )}
 
+      {arrived && (
+        <div className="notice" role="status">
+          <span>
+            <strong>{arrived.model}</strong> encendida ({arrived.name}). Para pasar sus videos, conéctala por USB-C o
+            mete la microSD; la transferencia por Wi-Fi llega en la siguiente etapa.
+          </span>
+          <button className="icon" onClick={() => setArrived(null)} aria-label="Cerrar">
+            ×
+          </button>
+        </div>
+      )}
+
       <main className="content">
         {tab === "import" && (
           <ImportView libraryDir={settings.libraryDir} libraryFiles={library} onImported={refreshLibrary} onError={setError} />
@@ -75,5 +116,28 @@ export default function App() {
         {tab === "settings" && <SettingsView settings={settings} onChange={setSettings} onError={setError} />}
       </main>
     </div>
+  );
+}
+
+function CameraStatus({ nearby }: { nearby: Nearby }) {
+  if (nearby.bluetoothError) {
+    return (
+      <span className="camera-status" title={nearby.bluetoothError}>
+        <span className="dot" /> Bluetooth no disponible
+      </span>
+    );
+  }
+  const [first, ...rest] = nearby.cameras;
+  if (!first) {
+    return (
+      <span className="camera-status" title="Enciende la cámara para que aparezca aquí">
+        <span className="dot" /> Sin cámara encendida
+      </span>
+    );
+  }
+  return (
+    <span className="camera-status on" title={nearby.cameras.map((c) => c.name).join(", ")}>
+      <span className="dot" /> {first.model} encendida{rest.length > 0 && ` y ${rest.length} más`}
+    </span>
   );
 }
