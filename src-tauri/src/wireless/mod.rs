@@ -5,4 +5,5 @@ pub mod ble;
 pub mod config;
 pub mod duml;
 pub mod log;
+pub mod watch;
 pub mod wifi;
