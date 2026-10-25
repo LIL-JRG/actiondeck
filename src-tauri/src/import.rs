@@ -106,7 +106,14 @@ pub fn import_files(
             })
         });
         match result {
-            Ok(true) => summary.copied.push(source.to_string_lossy().into_owned()),
+            Ok(true) => {
+                // Un 360 se ve con su `.LRF` (las dos lentes en pequeño): va con él.
+                let is_360 = source.extension().is_some_and(|e| e.eq_ignore_ascii_case("osv"));
+                if let Some(lrf) = crate::media::lrf_beside(source).filter(|_| is_360) {
+                    let _ = std::fs::copy(lrf, dest.with_extension("LRF"));
+                }
+                summary.copied.push(source.to_string_lossy().into_owned())
+            }
             Ok(false) => {
                 summary.cancelled = true;
                 break;

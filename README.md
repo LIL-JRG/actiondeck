@@ -1,11 +1,14 @@
 # ActionDeck
 
-App de escritorio para Windows que hace con una DJI Osmo Action 5 Pro lo que DJI Mimo hace en el teléfono.
+App de escritorio para Windows y macOS que hace con las cámaras DJI Osmo lo que DJI Mimo hace en el teléfono.
 
 Fase 1 (esta versión):
 
 - **Importar**: detecta la cámara conectada por USB o su microSD (cualquier unidad con `DCIM`) y copia los videos y fotos a la biblioteca, en carpetas por fecha. No duplica lo ya importado y una copia interrumpida nunca queda como archivo completo.
-- **Recuperar color**: aplica la LUT oficial de DJI "D-Log M to Rec.709" (se descarga de DJI y se elige en Ajustes; la app no la incluye).
+- **Recuperar color**: las LUT oficiales de DJI para convertir D-Log M, D-Log y D-Log2 a Rec.709 vienen dentro de la app. Cada clip usa la de su cámara: la app lee el modelo y el perfil de color de los metadatos de DJI y solo convierte los clips grabados en un perfil logarítmico.
+- **Filtros**: los estilos creativos de DJI (Action 4, Action 5 Pro, Pocket 3) se descargan con un clic desde Ajustes, y se puede importar cualquier LUT `.cube`.
+- **Vista previa en vivo**: el color recuperado y el filtro se ven mientras se reproduce (WebGL2 con LUT 3D en la GPU), en el editor, en el álbum y en la tira de cuadros.
+- **Videos 360 (Osmo 360)**: los `.OSV` se ven arrastrando para mirar alrededor, en vista normal o "pequeño planeta"; en el editor cada clip guarda su vista y se exporta en cualquier formato (también vertical) con el `v360` de ffmpeg. La vista previa usa el `.LRF` de la cámara (las dos lentes lado a lado) y se importa junto con el `.OSV`.
 - **Editar**: recortar clips, compararlos antes y después de la LUT, ordenarlos en una línea de tiempo y unirlos.
 - **Exportar**: H.265 de 10 bits o H.264, por GPU NVIDIA (NVENC) o procesador, con progreso y cancelación.
 
@@ -13,6 +16,19 @@ Fase 2:
 
 - **Detectar la cámara** por Bluetooth en cuanto se enciende, como DJI Mimo.
 - **Importar por Wi-Fi**: la primera vez se acepta la conexión en la pantalla de la cámara; después, al encenderla, la app la detecta sola y ofrece conectarse. Se une a la red de la cámara, muestra sus archivos con miniaturas y vista previa, y descarga los que elijas (unos 70 MB/s). Vuelve a la red anterior al desconectar o tras 2 minutos sin usarla. Con un solo adaptador Wi-Fi, la computadora no tiene internet mientras tanto.
+
+## Cámaras
+
+| Modelo | USB / microSD | Wi-Fi | LUT incluida |
+|---|---|---|---|
+| Osmo Action 5 Pro | sí | probada | D-Log M |
+| Osmo Action 6, Pocket 3, Nano | sí | mismo protocolo (verificado por [Osmosis](https://github.com/KonradIT/osmosis)) | D-Log M |
+| Osmo Action 4, Pocket 4, Pocket 4 Pro | sí | sin probar | D-Log M / D-Log / D-Log2 |
+| Osmo Action 3 | sí | sin probar | — (D-Cinelike) |
+| Osmo 360 | sí, incluidos los 360 `.OSV` | no levanta su red Wi-Fi | D-Log M |
+| Osmo Action, Action 2 | sí | no | — |
+
+Las tablas de modelos están en `src-tauri/src/devices.rs`; las LUT, en `src-tauri/resources/luts/`.
 
 Fase siguiente: DJI Mic Mini 2 (fase 3).
 
@@ -37,11 +53,13 @@ npm run tauri build                     # instalador NSIS en src-tauri\target\re
 
 - `src-tauri/src/media.rs`: análisis de clips con ffprobe, búsqueda de archivos y detección de la cámara.
 - `src-tauri/src/import.rs`: copia con progreso a la biblioteca.
-- `src-tauri/src/render.rs`: LUT, exportación, cuadros de comparación y vistas previas ligeras.
+- `src-tauri/src/render.rs`: exportación, cuadros de comparación y vistas previas ligeras.
+- `src-tauri/src/devices.rs`: modelos de cámara (Bluetooth, metadatos, Wi-Fi, LUT oficial).
+- `src-tauri/src/luts.rs`: LUT incluidas, extra del usuario y paquetes de estilos de DJI.
 - `src-tauri/src/lib.rs`: estado, ajustes y comandos que usa la interfaz.
 - `src/`: interfaz en React (Importar, Editar y exportar, Ajustes).
 
-Los ajustes se guardan en `%APPDATA%\com.jorge.actiondeck\settings.json`; miniaturas, vistas previas y la LUT activa, en `%LOCALAPPDATA%\com.jorge.actiondeck`.
+Los ajustes se guardan en `%APPDATA%\com.jorge.actiondeck\settings.json`; las LUT extra, en `luts\` junto a ellos; miniaturas y vistas previas, en `%LOCALAPPDATA%\com.jorge.actiondeck`.
 
 ## Pendiente de probar en Mac
 
@@ -52,4 +70,4 @@ Los ajustes se guardan en `%APPDATA%\com.jorge.actiondeck\settings.json`; miniat
 ## Pendiente de probar con la cámara real
 
 - Que la Osmo Action 5 Pro por USB aparezca como unidad con letra (si aparece como dispositivo MTP, sin letra, la app no la verá todavía).
-- Cómo etiqueta la cámara sus clips en D-Log M, para marcar la LUT automáticamente solo en esos clips.
+- Wi-Fi con los modelos que no son la Action 5 Pro.

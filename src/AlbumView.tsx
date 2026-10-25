@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "motion/react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { api, errorText, type CameraDrive, type MediaFile, type NearbyCamera } from "./api";
+import { api, errorText, isPanoFile, type CameraDrive, type MediaFile, type NearbyCamera } from "./api";
 import { phaseProgress, type Camera, type Importer } from "./camera";
 import { CameraArt } from "./DeviceSheet";
 import type { ToolId } from "./EditView";
@@ -437,7 +437,7 @@ function SourceBar({
           <WifiIcon size={16} /> {link.camera.name}
         </span>
       ) : (
-        nearby.cameras.map((c) => (
+        nearby.cameras.filter((c) => c.wifi !== "unsupported").map((c) => (
           <button key={c.id} className="source-pill" onClick={() => onConnect(c)} disabled={link.status === "connecting"}>
             <WifiIcon size={16} /> {c.name}
           </button>
@@ -503,7 +503,7 @@ function DeviceEmpty({
   return (
     <motion.div className="device-empty" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.35 }}>
       <div className="device-card">
-        <CameraArt view={connecting ? "connecting" : target ? "found" : "searching"} size={260} />
+        <CameraArt view={connecting ? "connecting" : target ? "found" : "searching"} family={target?.family} size={260} />
         <div className="device-card-text">
           <AnimatePresence mode="wait" initial={false}>
             <motion.div key={target ? target.id + link.status : "none"} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}>
@@ -514,6 +514,14 @@ function DeviceEmpty({
                   <div className="bar">
                     <motion.div animate={{ width: `${phaseProgress(phase) * 100}%` }} transition={{ type: "spring", stiffness: 60, damping: 20 }} />
                   </div>
+                </>
+              ) : target?.wifi === "unsupported" ? (
+                <>
+                  <h2>{target.name}</h2>
+                  <p className="hint">
+                    La {target.model} aún no se puede conectar por Wi-Fi. Conéctala por USB-C o mete su microSD en un
+                    lector y aparecerá abajo.
+                  </p>
                 </>
               ) : target ? (
                 <>
@@ -588,6 +596,7 @@ function Tile({ file, thumb, duration, device, imported, selecting, selected, on
             <VideoIcon size={16} /> {duration != null ? formatDuration(duration) : ""}
           </span>
         )}
+        {isPanoFile(file) && <span className="tile-badge">360</span>}
         <AnimatePresence>
           {selecting && (
             <motion.span

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { AnimatePresence, motion, MotionConfig } from "motion/react";
-import { api, errorText, type MediaFile, type NearbyCamera, type Settings, type TimelineItem } from "./api";
+import { api, errorText, type Lut, type MediaFile, type NearbyCamera, type Settings, type TimelineItem } from "./api";
 import { AlbumView, type Scope } from "./AlbumView";
 import { useCamera, useImporter } from "./camera";
 import { DeviceSheet } from "./DeviceSheet";
@@ -30,6 +30,8 @@ export default function App() {
   const [editRequest, setEditRequest] = useState<EditRequest | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
+  // LUT oficiales (vienen con la app) y extra; las usan el editor y los ajustes.
+  const [luts, setLuts] = useState<Lut[]>([]);
   const clearError = useCallback(() => setError(null), []);
 
   const camera = useCamera();
@@ -41,6 +43,7 @@ export default function App() {
 
   useEffect(() => {
     api.getSettings().then(setSettings).catch((e) => setError(errorText(e)));
+    api.listLuts().then(setLuts).catch((e) => setError(errorText(e)));
   }, []);
 
   // En macOS el contenido sube bajo la barra de título transparente.
@@ -98,7 +101,6 @@ export default function App() {
               library={library}
               meta={libraryMeta}
               timeline={timeline}
-              hasLut={settings.lutName !== null}
               onConnect={connect}
               onOpenDevice={showDeviceFiles}
               onOpenLibrary={() => {
@@ -106,7 +108,6 @@ export default function App() {
                 setTab("album");
               }}
               onOpenEditor={() => setTab("edit")}
-              onOpenSettings={() => setTab("settings")}
               onEdit={edit}
             />
           </Page>
@@ -128,6 +129,7 @@ export default function App() {
             <EditView
               active={tab === "edit"}
               settings={settings}
+              luts={luts}
               library={library}
               meta={libraryMeta}
               timeline={timeline}
@@ -138,7 +140,7 @@ export default function App() {
             />
           </Page>
           <Page active={tab === "settings"}>
-            <SettingsView settings={settings} onChange={setSettings} onError={setError} />
+            <SettingsView settings={settings} onChange={setSettings} luts={luts} onLutsChange={setLuts} onError={setError} />
           </Page>
         </main>
 

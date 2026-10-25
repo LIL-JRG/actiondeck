@@ -1,6 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent, type RefObject, type WheelEvent } from "react";
 import { motion, useMotionValue } from "motion/react";
 import { formatClock } from "./format";
+import { loadLut, VideoRenderer, type View360 } from "./gl";
+
+/** Cómo se ve cada cuadro: con su LUT, su filtro y, si es 360, su vista. */
+export type FrameLook = { lut: string | null; look: string | null; view: View360 | null };
 
 /** Lo que se conserva de un clip, con sus bordes arrastrables en la tira. */
 export type TrimRange = { inPoint: number; outPoint: number; onChange: (inPoint: number, outPoint: number) => void };
@@ -13,6 +17,7 @@ type Props = {
   duration: number;
   trim?: TrimRange;
   height?: number;
+  look?: FrameLook;
 };
 
 const MIN_TRIM = 0.2;
@@ -22,7 +27,15 @@ const MIN_TRIM = 0.2;
  * corre debajo. Se arrastra (o se usa la rueda) para buscar; con `trim`, los
  * bordes amarillos marcan el inicio y el fin del recorte.
  */
-export function Filmstrip({ videoRef, src, duration, trim, height = 56 }: Props) {
+export function Filmstrip({ videoRef, src, duration, trim, height = 56, look }: Props) {
+  // Mientras se arrastra la vista de un 360 no se rehacen los cuadros a cada paso.
+  const lookKey = JSON.stringify(look ?? null);
+  const [settledLook, setSettledLook] = useState(look);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSettledLook(look), 450);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lookKey]);
   const boxRef = useRef<HTMLDivElement>(null);
   const clockRef = useRef<HTMLSpanElement>(null);
   const [width, setWidth] = useState(0);
@@ -121,7 +134,7 @@ export function Filmstrip({ videoRef, src, duration, trim, height = 56 }: Props)
         onWheel={onWheel}
       >
         <motion.div className="filmstrip-track" style={{ x, width: stripWidth, height }}>
-          <Frames src={src} duration={duration} count={frameCount} frameWidth={frameWidth} height={height} />
+          <Frames src={src} duration={duration} count={frameCount} frameWidth={frameWidth} height={height} look={settledLook} />
           {trim && <TrimHandles trim={trim} duration={duration} pxPerSec={pxPerSec} onSeek={seek} />}
         </motion.div>
         <div className="playhead" />
@@ -137,19 +150,23 @@ function Frames({
   count,
   frameWidth,
   height,
+  look,
 }: {
   src: string | null;
   duration: number;
   count: number;
   frameWidth: number;
   height: number;
+  look?: FrameLook;
 }) {
   const canvases = useRef<(HTMLCanvasElement | null)[]>([]);
+  const lookKey = JSON.stringify(look ?? null);
 
   useEffect(() => {
     if (!src || !count || !duration) return;
     let cancelled = false;
     const video = document.createElement("video");
+    video.crossOrigin = "anonymous";
     video.muted = true;
     video.preload = "auto";
     video.playsInline = true;
@@ -168,9 +185,28 @@ function Frames({
         );
       });
 
+    // Con LUT, filtro o vista 360, cada cuadro pasa por la GPU como el video.
+    let renderer: VideoRenderer | null = null;
+    const graded = !!look && (!!look.lut || !!look.look || !!look.view) && VideoRenderer.supported();
+
     (async () => {
       if (!(await once("loadeddata", 15000)) || cancelled) return;
       const dpr = window.devicePixelRatio || 1;
+      if (graded && look) {
+        try {
+          const gl = document.createElement("canvas");
+          gl.width = frameWidth * dpr;
+          gl.height = height * dpr;
+          renderer = new VideoRenderer(gl);
+          renderer.view = look.view;
+          renderer.fit = "cover";
+          const [lut, lookLut] = await Promise.all([look.lut ? loadLut(look.lut) : null, look.look ? loadLut(look.look) : null]);
+          renderer.setLut(0, lut);
+          renderer.setLut(1, lookLut);
+        } catch {
+          renderer = null;
+        }
+      }
       for (let i = 0; i < count; i++) {
         if (cancelled) return;
         const canvas = canvases.current[i];
@@ -181,6 +217,11 @@ function Frames({
         canvas.height = height * dpr;
         const ctx = canvas.getContext("2d");
         if (!ctx) continue;
+        if (renderer?.draw(video)) {
+          ctx.drawImage(renderer.canvas, 0, 0, canvas.width, canvas.height);
+          canvas.classList.add("ready");
+          continue;
+        }
         // Como object-fit: cover.
         const scale = Math.max(canvas.width / video.videoWidth, canvas.height / video.videoHeight);
         const w = video.videoWidth * scale;
@@ -192,10 +233,13 @@ function Frames({
 
     return () => {
       cancelled = true;
+      renderer?.dispose(true);
       video.removeAttribute("src");
       video.load();
     };
-  }, [src, duration, count, frameWidth, height]);
+    // look llega como lookKey: solo cambia cuando cambia su contenido.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [src, duration, count, frameWidth, height, lookKey]);
 
   return (
     <div className="frames">

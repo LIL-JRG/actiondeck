@@ -1,18 +1,50 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
-import { api, errorText, hardwareName, type Settings } from "./api";
-import { ChipIcon, ExternalIcon, FolderIcon, LogIcon } from "./icons";
+import { api, errorText, hardwareName, type Lut, type LutPack, type Settings } from "./api";
+import { shortLutName } from "./EditView";
+import { CheckIcon, ChipIcon, DownloadIcon, ExternalIcon, FolderIcon, LogIcon, PaletteIcon, PlusIcon, TrashIcon } from "./icons";
 
-const DJI_DOWNLOADS = "https://www.dji.com/downloads/djiapp/dji-mimo";
+const DJI_DOWNLOADS = "https://www.dji.com/downloads";
 
 type Props = {
   settings: Settings;
   onChange: (settings: Settings) => void;
+  luts: Lut[];
+  onLutsChange: (luts: Lut[]) => void;
   onError: (message: string) => void;
 };
 
-export function SettingsView({ settings, onChange, onError }: Props) {
+export function SettingsView({ settings, onChange, luts, onLutsChange, onError }: Props) {
+  const [packs, setPacks] = useState<LutPack[]>([]);
+  const [downloading, setDownloading] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.lutPacks().then(setPacks).catch(() => {});
+  }, [luts]);
+
+  const changeLuts = async (action: () => Promise<Lut[]>) => {
+    try {
+      onLutsChange(await action());
+    } catch (e) {
+      onError(errorText(e));
+    }
+  };
+
+  const importLut = async () => {
+    const path = await open({ title: "LUT extra (.cube)", filters: [{ name: "LUT 3D", extensions: ["cube"] }] });
+    if (typeof path === "string") changeLuts(() => api.importLut(path));
+  };
+
+  const downloadPack = async (id: string) => {
+    setDownloading(id);
+    await changeLuts(() => api.downloadLutPack(id));
+    setDownloading(null);
+  };
+
+  const official = luts.filter((l) => l.builtin);
+  const extras = luts.filter((l) => !l.builtin);
+
   const apply = async (action: () => Promise<Settings>) => {
     try {
       onChange(await action());
@@ -24,11 +56,6 @@ export function SettingsView({ settings, onChange, onError }: Props) {
   const pickLibrary = async () => {
     const path = await open({ directory: true, title: "Carpeta de la biblioteca", defaultPath: settings.libraryDir });
     if (typeof path === "string") apply(() => api.setLibraryDir(path));
-  };
-
-  const pickLut = async () => {
-    const path = await open({ title: "LUT de D-Log M (.cube)", filters: [{ name: "LUT 3D", extensions: ["cube"] }] });
-    if (typeof path === "string") apply(() => api.setLut(path));
   };
 
   const pickFfmpeg = async () => {
@@ -48,25 +75,50 @@ export function SettingsView({ settings, onChange, onError }: Props) {
           title="Recuperación de color"
           text={
             <>
-              La Osmo Action 5 Pro graba en D-Log M, un perfil plano que conserva más detalle pero se ve gris. La LUT
-              oficial de DJI <em>«D-Log M to Rec.709»</em> le devuelve el color. Descárgala de la página de DJI,
-              descomprímela y elige el archivo <span className="mono">.cube</span>.
+              Las cámaras DJI graban en D-Log M (o D-Log), un perfil plano que conserva más detalle pero se ve gris. Las
+              LUT oficiales de DJI le devuelven el color; ya vienen en la app y cada clip usa la de su cámara.
             </>
           }
         >
-          <SettingRow label="LUT" value={settings.lutName ? `${settings.lutName} (${settings.lutSize}³)` : "Sin elegir: se exporta con el color original"}>
-            {settings.lutName && (
-              <button className="link" onClick={() => apply(api.clearLut)}>
-                Quitar
+          {official.map((l) => (
+            <SettingRow key={l.id} label={l.name} value={l.detail}>
+              <span className="tag">Incluida</span>
+            </SettingRow>
+          ))}
+        </Group>
+
+        <Group
+          icon={<PaletteIcon size={24} />}
+          title="Filtros (LUT extra)"
+          text="Estilos que se aplican encima del color recuperado. Descarga los de DJI o importa cualquier LUT .cube."
+        >
+          {packs.map((p) => (
+            <SettingRow key={p.id} label={`Estilos de DJI para ${p.name}`} value={p.installed ? "Descargados" : "Del sitio de DJI"}>
+              {p.installed ? (
+                <span className="tag ok">
+                  <CheckIcon size={14} /> Listo
+                </span>
+              ) : (
+                <button className="pill small" onClick={() => downloadPack(p.id)} disabled={downloading !== null}>
+                  {downloading === p.id ? <span className="spinner" /> : <DownloadIcon size={16} />}
+                  {downloading === p.id ? "Descargando…" : "Descargar"}
+                </button>
+              )}
+            </SettingRow>
+          ))}
+          {extras.map((l) => (
+            <SettingRow key={l.id} label={shortLutName(l.name)} value={l.name}>
+              <button className="round small" onClick={() => changeLuts(() => api.removeLut(l.id))} aria-label={`Quitar ${l.name}`} title="Quitar">
+                <TrashIcon size={18} />
               </button>
-            )}
-            <button className="pill small" onClick={pickLut}>
-              {settings.lutName ? "Cambiar…" : "Elegir…"}
-            </button>
-          </SettingRow>
-          <SettingRow label="Descargar la LUT" value="Página de descargas de DJI">
-            <button className="round small" onClick={() => openUrl(DJI_DOWNLOADS)} aria-label="Abrir la página de DJI">
+            </SettingRow>
+          ))}
+          <SettingRow label="Otra LUT" value="Un archivo .cube de cualquier fuente">
+            <button className="round small" onClick={() => openUrl(DJI_DOWNLOADS)} aria-label="Abrir las descargas de DJI" title="Descargas de DJI">
               <ExternalIcon size={18} />
+            </button>
+            <button className="pill small" onClick={importLut}>
+              <PlusIcon size={16} /> Importar…
             </button>
           </SettingRow>
         </Group>

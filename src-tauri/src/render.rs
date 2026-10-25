@@ -29,7 +29,13 @@ pub struct TimelineItem {
     pub path: String,
     pub in_point: f64,
     pub out_point: f64,
-    pub apply_lut: bool,
+    /// LUT que convierte el perfil de la cámara a Rec.709, como ruta relativa
+    /// a la caché (`luts/dlog-m.cube`; ver `luts::materialize`).
+    #[serde(default)]
+    pub lut: Option<String>,
+    /// Estilo creativo que se aplica después de la conversión, igual de relativo.
+    #[serde(default)]
+    pub look: Option<String>,
     pub has_audio: bool,
     /// 1 = normal, 0.25 = cuatro veces más lento, 4 = cuatro veces más rápido.
     #[serde(default = "one")]
@@ -43,6 +49,79 @@ pub struct TimelineItem {
     pub crop_x: f64,
     #[serde(default = "half")]
     pub crop_y: f64,
+    /// Video 360 (dos lentes): la vista que se elige en el editor. Sin ella
+    /// el clip es un video normal.
+    #[serde(default)]
+    pub view: Option<View360>,
+}
+
+/// Proyección de la vista de un video 360.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ViewMode {
+    /// Como una cámara normal que mira hacia un lado.
+    #[default]
+    Flat,
+    /// Proyección estereográfica hacia abajo: un "pequeño planeta".
+    Planet,
+}
+
+/// Hacia dónde mira un video 360 y con qué ángulo, en grados. Mismas
+/// convenciones que el visor de la interfaz (`gl.ts`): yaw positivo gira a
+/// la derecha y pitch positivo mira hacia arriba.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq)]
+pub struct View360 {
+    pub yaw: f64,
+    pub pitch: f64,
+    pub roll: f64,
+    /// Campo de visión horizontal.
+    pub fov: f64,
+    #[serde(default)]
+    pub mode: ViewMode,
+}
+
+impl Default for View360 {
+    fn default() -> Self {
+        View360 { yaw: 0.0, pitch: 0.0, roll: 0.0, fov: 100.0, mode: ViewMode::Flat }
+    }
+}
+
+/// Campo de visión de cada lente de la Osmo 360 (grados), medido en la
+/// costura de un clip real; el visor de la interfaz usa el mismo.
+pub const LENS_FOV: f64 = 195.0;
+
+/// Cómo llegan las dos lentes de un video 360.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Lenses {
+    /// Dos pistas de video, una por lente (el `.OSV`).
+    Tracks,
+    /// Lado a lado en un solo cuadro (el `.LRF` y la vista previa).
+    SideBySide,
+}
+
+/// Lleva las dos lentes de la entrada `input` a la vista elegida, de `w`×`h`.
+fn pano_filter(input: usize, lenses: Lenses, view: &View360, w: u32, h: u32) -> String {
+    let aspect = f64::from(w) / f64::from(h);
+    let (output, h_fov, v_fov) = match view.mode {
+        ViewMode::Flat => {
+            let h_fov = view.fov.clamp(20.0, 170.0);
+            let v_fov = 2.0 * ((h_fov / 2.0).to_radians().tan() / aspect).atan().to_degrees();
+            ("flat", h_fov, v_fov)
+        }
+        ViewMode::Planet => {
+            let h_fov = view.fov.clamp(90.0, 340.0);
+            let v_fov = 4.0 * ((h_fov / 4.0).to_radians().tan() / aspect).atan().to_degrees();
+            ("sg", h_fov, v_fov)
+        }
+    };
+    let joined = match lenses {
+        Lenses::Tracks => format!("[{input}:v:0][{input}:v:1]hstack=inputs=2,"),
+        Lenses::SideBySide => format!("[{input}:v:0]"),
+    };
+    format!(
+        "{joined}v360=input=dfisheye:output={output}:ih_fov={LENS_FOV}:iv_fov={LENS_FOV}:yaw={:.3}:pitch={:.3}:roll={:.3}:h_fov={h_fov:.3}:v_fov={v_fov:.3}:w={w}:h={h}:interp=cubic",
+        view.yaw, view.pitch, view.roll
+    )
 }
 
 impl TimelineItem {
@@ -109,39 +188,14 @@ pub struct ExportProgress {
     pub speed: Option<String>,
 }
 
-/// Nombre de la LUT activa dentro de la carpeta de caché.
-pub const ACTIVE_LUT: &str = "active.cube";
-
-/// Comprueba que el archivo sea una LUT 3D `.cube` y devuelve su tamaño.
-pub fn validate_cube(path: &Path) -> Result<u32, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("No pude leer la LUT: {e}"))?;
-    let size = text
-        .lines()
-        .map(str::trim)
-        .find_map(|l| l.strip_prefix("LUT_3D_SIZE"))
-        .and_then(|s| s.trim().parse::<u32>().ok())
-        .ok_or("El archivo no es una LUT 3D .cube (falta LUT_3D_SIZE)")?;
-    let rows = text
-        .lines()
-        .map(str::trim)
-        .filter(|l| l.split_whitespace().count() == 3 && l.split_whitespace().all(|v| v.parse::<f64>().is_ok()))
-        .count() as u64;
-    let expected = u64::from(size).pow(3);
-    if rows != expected {
-        return Err(format!("La LUT dice tamaño {size} pero tiene {rows} de {expected} valores"));
-    }
-    Ok(size)
+/// `file` es relativa a la caché, desde donde corre ffmpeg: sin espacios ni
+/// dos puntos que haya que escapar dentro del filtro.
+fn lut_filter(file: &str) -> String {
+    format!("lut3d=file={file}:interp=tetrahedral")
 }
 
-pub fn install_lut(source: &Path, cache_dir: &Path) -> Result<u32, String> {
-    let size = validate_cube(source)?;
-    std::fs::create_dir_all(cache_dir).map_err(|e| e.to_string())?;
-    std::fs::copy(source, cache_dir.join(ACTIVE_LUT)).map_err(|e| format!("No pude copiar la LUT: {e}"))?;
-    Ok(size)
-}
-
-fn lut_filter() -> String {
-    format!("lut3d=file={ACTIVE_LUT}:interp=tetrahedral")
+fn item_luts(item: &TimelineItem) -> impl Iterator<Item = &String> {
+    item.lut.iter().chain(item.look.iter())
 }
 
 fn encoder_args(settings: &ExportSettings) -> Vec<String> {
@@ -217,13 +271,18 @@ pub fn build_export_args(items: &[TimelineItem], settings: &ExportSettings, outp
         if !(0.1..=16.0).contains(&item.speed) {
             return Err(format!("La velocidad del clip {} debe estar entre 0.1× y 16×", i + 1));
         }
+        args.extend(hw_decode().iter().map(|a| a.to_string()));
         args.extend(["-ss".into(), secs(item.in_point), "-t".into(), secs(duration), "-i".into(), item.path.clone()]);
 
         let mut video = Vec::new();
-        if item.apply_lut {
-            video.push(lut_filter());
-        }
+        // Un 360 ya sale del tamaño final al elegir su vista: no se recorta.
+        let head = match &item.view {
+            Some(view) => format!("{},", pano_filter(i, Lenses::Tracks, view, w, h)),
+            None => format!("[{i}:v:0]"),
+        };
+        video.extend(item_luts(item).map(|f| lut_filter(f)));
         match settings.fit {
+            _ if item.view.is_some() => {}
             Fit::Crop => {
                 // El mayor rectángulo del formato de salida que cabe en el clip,
                 // movido según crop_x/crop_y.
@@ -247,7 +306,7 @@ pub fn build_export_args(items: &[TimelineItem], settings: &ExportSettings, outp
         // ffmpeg toma las etiquetas de color de los cuadros, no de las opciones
         // de salida; sin esto el archivo queda con primarios y curva "unknown".
         video.push("setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv".into());
-        graph.push(format!("[{i}:v:0]{}[v{i}]", video.join(",")));
+        graph.push(format!("{head}{}[v{i}]", video.join(",")));
 
         let gain = item.volume.clamp(0.0, 2.0);
         if item.has_audio && gain > 0.0 {
@@ -279,6 +338,16 @@ pub fn build_export_args(items: &[TimelineItem], settings: &ExportSettings, outp
     Ok(args)
 }
 
+/// Decodificar con la GPU: en una Mac, las dos lentes HEVC de 10 bits de un
+/// 360 se leen 5 veces más rápido. Si no se puede, ffmpeg sigue por software.
+fn hw_decode() -> &'static [&'static str] {
+    if cfg!(target_os = "macos") {
+        &["-hwaccel", "videotoolbox"]
+    } else {
+        &[]
+    }
+}
+
 fn secs(value: f64) -> String {
     format!("{value:.3}")
 }
@@ -296,8 +365,8 @@ pub fn run_export(
     mut on_progress: impl FnMut(ExportProgress),
 ) -> Result<PathBuf, String> {
     let output = PathBuf::from(&settings.output);
-    if items.iter().any(|i| i.apply_lut) && !cache_dir.join(ACTIVE_LUT).is_file() {
-        return Err("Elige una LUT en Ajustes antes de exportar con color corregido".into());
+    if let Some(missing) = items.iter().flat_map(item_luts).find(|f| !cache_dir.join(f).is_file()) {
+        return Err(format!("Falta la LUT {missing}"));
     }
     let parent = output.parent().ok_or("Ruta de salida inválida")?;
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -379,24 +448,38 @@ pub fn extract_frame(
     cache_dir: &Path,
     source: &Path,
     at: f64,
-    apply_lut: bool,
+    luts: &[String],
+    pano: Option<(Lenses, &View360)>,
     max_height: u32,
     output: &Path,
 ) -> Result<(), String> {
-    if apply_lut && !cache_dir.join(ACTIVE_LUT).is_file() {
-        return Err("No hay LUT elegida".into());
+    if let Some(missing) = luts.iter().find(|f| !cache_dir.join(f).is_file()) {
+        return Err(format!("Falta la LUT {missing}"));
     }
-    let mut filters = Vec::new();
-    if apply_lut {
-        filters.push(lut_filter());
+    // Un 360 se ve con la vista elegida, en 16:9.
+    let head = match pano {
+        Some((lenses, view)) => {
+            let h = max_height - max_height % 2;
+            format!("{},", pano_filter(0, lenses, view, (h * 16 / 9) & !1, h))
+        }
+        None => "[0:v:0]".into(),
+    };
+    let mut steps: Vec<String> = luts.iter().map(|f| lut_filter(f)).collect();
+    if pano.is_none() {
+        steps.push(format!("scale=-2:'min({max_height},ih)'"));
     }
-    filters.push(format!("scale=-2:'min({max_height},ih)'"));
+    if steps.is_empty() {
+        steps.push("null".into());
+    }
+    let graph = format!("{head}{}[out]", steps.join(","));
     let out = tools
         .ffmpeg()
         .current_dir(cache_dir)
-        .args(["-hide_banner", "-loglevel", "error", "-y", "-ss", &secs(at.max(0.0)), "-i"])
+        .args(["-hide_banner", "-loglevel", "error", "-y"])
+        .args(hw_decode())
+        .args(["-ss", &secs(at.max(0.0)), "-i"])
         .arg(source)
-        .args(["-frames:v", "1", "-vf", &filters.join(","), "-q:v", "3"])
+        .args(["-frames:v", "1", "-filter_complex", &graph, "-map", "[out]", "-q:v", "3"])
         .arg(output)
         .output()
         .map_err(|e| format!("No pude ejecutar ffmpeg: {e}"))?;
@@ -406,9 +489,19 @@ pub fn extract_frame(
     Ok(())
 }
 
+/// Versión liviana de un video 360 con las dos lentes lado a lado (como el
+/// `.LRF` de la cámara), para verlo en la app con la vista que se elija.
+pub fn make_pano_proxy(tools: &Tools, source: &Path, encoder: Encoder, output: &Path) -> Result<(), String> {
+    make_proxy_with(tools, source, encoder, "[0:v:0][0:v:1]hstack=inputs=2,scale=2048:1024,format=yuv420p", output)
+}
+
 /// Versión liviana en H.264 de 8 bits para reproducir en la app videos que
 /// WebView2 no reproduce (HEVC de 10 bits).
 pub fn make_proxy(tools: &Tools, source: &Path, encoder: Encoder, output: &Path) -> Result<(), String> {
+    make_proxy_with(tools, source, encoder, "[0:v:0]scale=-2:'min(540,ih)',format=yuv420p", output)
+}
+
+fn make_proxy_with(tools: &Tools, source: &Path, encoder: Encoder, graph: &str, output: &Path) -> Result<(), String> {
     let partial = output.with_extension("part.mp4");
     let video_codec: &[&str] = match encoder {
         Encoder::Nvenc => &["-c:v", "h264_nvenc", "-preset", "p3", "-cq", "28"],
@@ -417,9 +510,11 @@ pub fn make_proxy(tools: &Tools, source: &Path, encoder: Encoder, output: &Path)
     };
     let out = tools
         .ffmpeg()
-        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .args(["-hide_banner", "-loglevel", "error", "-y"])
+        .args(hw_decode())
+        .arg("-i")
         .arg(source)
-        .args(["-vf", "scale=-2:'min(540,ih)',format=yuv420p"])
+        .args(["-filter_complex", &format!("{graph}[v]"), "-map", "[v]", "-map", "0:a:0?"])
         .args(video_codec)
         .args(["-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart"])
         .arg(&partial)
@@ -449,18 +544,41 @@ mod tests {
         }
     }
 
-    fn item(path: &str, apply_lut: bool, has_audio: bool) -> TimelineItem {
+    fn item(path: &str, lut: bool, has_audio: bool) -> TimelineItem {
         TimelineItem {
             path: path.into(),
             in_point: 1.0,
             out_point: 3.5,
-            apply_lut,
+            lut: lut.then(|| "luts/dlog-m.cube".into()),
+            look: None,
             has_audio,
             speed: 1.0,
             volume: 1.0,
             crop_x: 0.5,
             crop_y: 0.5,
+            view: None,
         }
+    }
+
+    #[test]
+    fn a_360_clip_joins_its_lenses_and_takes_the_chosen_view() {
+        let view = View360 { yaw: 90.0, pitch: -10.0, ..View360::default() };
+        let pano = TimelineItem { view: Some(view), ..item("CAM_0003_D.OSV", true, true) };
+        let vertical = ExportSettings { width: 1080, height: 1920, fit: Fit::Crop, ..settings() };
+        let args = build_export_args(&[pano], &vertical, Path::new("out.mp4")).unwrap();
+        let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
+        assert!(
+            graph.starts_with("[0:v:0][0:v:1]hstack=inputs=2,v360=input=dfisheye:output=flat:ih_fov=195:iv_fov=195:yaw=90.000:pitch=-10.000"),
+            "{graph}"
+        );
+        // Vertical: el campo horizontal es el elegido y el vertical, el que le toca.
+        assert!(graph.contains(":h_fov=100.000:v_fov=129.") && graph.contains(":w=1080:h=1920:"), "{graph}");
+        // Sin recorte: la vista ya es del tamaño final; la LUT va después.
+        assert!(!graph.contains("crop=") && graph.contains("interp=cubic,lut3d=file=luts/dlog-m.cube"), "{graph}");
+
+        let planet = View360 { mode: ViewMode::Planet, pitch: -90.0, fov: 260.0, ..View360::default() };
+        let filter = pano_filter(0, Lenses::SideBySide, &planet, 1920, 1080);
+        assert!(filter.starts_with("[0:v:0]v360=input=dfisheye:output=sg:") && filter.contains(":h_fov=260.000:"), "{filter}");
     }
 
     #[test]
@@ -495,7 +613,7 @@ mod tests {
         let items = [item(r"C:\Videos\a b.MP4", true, true), item(r"C:\Videos\c.MP4", false, false)];
         let args = build_export_args(&items, &settings(), Path::new("out.mp4")).unwrap();
         let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
-        assert!(graph.starts_with("[0:v:0]lut3d=file=active.cube"));
+        assert!(graph.starts_with("[0:v:0]lut3d=file=luts/dlog-m.cube:interp=tetrahedral,"));
         assert!(!graph.contains("[1:v:0]lut3d"));
         assert!(graph.contains("anullsrc=r=48000:cl=stereo,atrim=duration=2.500[a1]"));
         assert!(graph.ends_with("[v0][a0][v1][a1]concat=n=2:v=1:a=1[vout][aout]"));
@@ -578,13 +696,13 @@ mod tests {
         for _ in 0..8 {
             lut.push_str("0.8 0.4 0.1\n");
         }
-        let lut_path = dir.path().join("Mi LUT (prueba).cube");
-        std::fs::write(&lut_path, lut).unwrap();
         let cache = dir.path().join("cache con espacios");
-        install_lut(&lut_path, &cache).unwrap();
+        std::fs::create_dir_all(cache.join("luts")).unwrap();
+        std::fs::write(cache.join("luts/prueba.cube"), lut).unwrap();
+        let lut = || Some("luts/prueba.cube".to_string());
 
         let items = [
-            TimelineItem { path: p("dlog.mp4"), in_point: 0.5, out_point: 2.5, apply_lut: true, ..item("", false, true) },
+            TimelineItem { path: p("dlog.mp4"), in_point: 0.5, out_point: 2.5, lut: lut(), ..item("", false, true) },
             TimelineItem { path: p("vertical.mp4"), in_point: 0.0, out_point: 1.5, ..item("", false, false) },
         ];
         let settings = ExportSettings {
@@ -619,7 +737,7 @@ mod tests {
         assert!(untouched.iter().all(|&c| c < 150), "{untouched:?}");
 
         let frame = dir.path().join("cuadro.jpg");
-        extract_frame(&tools, &cache, Path::new(&p("dlog.mp4")), 1.0, true, 360, &frame).unwrap();
+        extract_frame(&tools, &cache, Path::new(&p("dlog.mp4")), 1.0, &[lut().unwrap()], None, 360, &frame).unwrap();
         let tinted_frame = pixel_at(&tools, &frame, None);
         assert!(tinted_frame[0].abs_diff(204) < 12, "{tinted_frame:?}");
 
@@ -706,26 +824,5 @@ mod tests {
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
     }
-
-    #[test]
-    fn validates_cube_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let good = dir.path().join("good.cube");
-        let mut text = String::from("TITLE \"identity\"\nLUT_3D_SIZE 2\n");
-        for b in 0..2 {
-            for g in 0..2 {
-                for r in 0..2 {
-                    text.push_str(&format!("{r} {g} {b}\n"));
-                }
-            }
-        }
-        std::fs::write(&good, &text).unwrap();
-        assert_eq!(validate_cube(&good).unwrap(), 2);
-
-        let truncated = dir.path().join("bad.cube");
-        std::fs::write(&truncated, "LUT_3D_SIZE 2\n0 0 0\n").unwrap();
-        assert!(validate_cube(&truncated).is_err());
-        std::fs::write(&truncated, "not a lut").unwrap();
-        assert!(validate_cube(&truncated).is_err());
-    }
 }
+

@@ -6,7 +6,7 @@ import { phaseProgress, type Camera } from "./camera";
 import { CameraArt } from "./DeviceSheet";
 import type { ToolId } from "./EditView";
 import { formatBytes, formatDuration } from "./format";
-import { AlbumIcon, ChevronRightIcon, ClapperIcon, LogIcon, VideoIcon, WifiIcon } from "./icons";
+import { AlbumIcon, ClapperIcon, VideoIcon, WifiIcon } from "./icons";
 import { durationOf, type LocalMeta } from "./library";
 import { Player } from "./Player";
 
@@ -15,12 +15,10 @@ type Props = {
   library: MediaFile[];
   meta: LocalMeta;
   timeline: TimelineItem[];
-  hasLut: boolean;
   onConnect: (camera: NearbyCamera) => void;
   onOpenDevice: () => void;
   onOpenLibrary: () => void;
   onOpenEditor: () => void;
-  onOpenSettings: () => void;
   onEdit: (files: MediaFile[], tool: ToolId | null) => void;
 };
 
@@ -30,7 +28,7 @@ const appear = (i: number) => ({
   transition: { duration: 0.45, delay: 0.05 + i * 0.06, ease: [0.2, 0.8, 0.2, 1] as const },
 });
 
-export function HomeView({ camera, library, meta, timeline, hasLut, onConnect, onOpenDevice, onOpenLibrary, onOpenEditor, onOpenSettings, onEdit }: Props) {
+export function HomeView({ camera, library, meta, timeline, onConnect, onOpenDevice, onOpenLibrary, onOpenEditor, onEdit }: Props) {
   const { link, nearby, phase } = camera;
   const recent = useMemo(() => [...library].sort((a, b) => b.modifiedMs - a.modifiedMs).slice(0, 12), [library]);
   const [viewer, setViewer] = useState<number | null>(null);
@@ -79,7 +77,10 @@ export function HomeView({ camera, library, meta, timeline, hasLut, onConnect, o
                   <motion.div animate={{ width: `${phaseProgress(phase) * 100}%` }} transition={{ type: "spring", stiffness: 60, damping: 20 }} />
                 </div>
               )}
-              {view === "found" && target && (
+              {view === "found" && target && target.wifi === "unsupported" && (
+                <p className="hero-note">Este modelo aún no se conecta por Wi-Fi: usa USB-C o su microSD.</p>
+              )}
+              {view === "found" && target && target.wifi !== "unsupported" && (
                 <button className="pill primary large" onClick={() => onConnect(target)}>
                   Conectar
                 </button>
@@ -93,22 +94,11 @@ export function HomeView({ camera, library, meta, timeline, hasLut, onConnect, o
           </AnimatePresence>
         </div>
         <div className="hero-art">
-          <CameraArt view={view} size={340} />
+          <CameraArt view={view} family={target?.family} size={340} />
         </div>
       </motion.section>
 
-      {!hasLut && (
-        <motion.button className="banner" onClick={onOpenSettings} {...appear(1)}>
-          <LogIcon size={26} />
-          <span>
-            <strong>Recupera el color de tus videos D-Log M</strong>
-            <span className="hint small">Elige la LUT oficial de DJI una vez y se aplica al editar.</span>
-          </span>
-          <ChevronRightIcon size={20} />
-        </motion.button>
-      )}
-
-      <motion.section className="home-cards" {...appear(2)}>
+      <motion.section className="home-cards" {...appear(1)}>
         <button className="home-card" onClick={onOpenLibrary}>
           <AlbumIcon size={26} />
           <strong>Biblioteca</strong>
@@ -126,7 +116,7 @@ export function HomeView({ camera, library, meta, timeline, hasLut, onConnect, o
       </motion.section>
 
       {recent.length > 0 && (
-        <motion.section className="recent" {...appear(3)}>
+        <motion.section className="recent" {...appear(2)}>
           <header className="section-head">
             <h3>Recientes</h3>
             <button className="link" onClick={onOpenLibrary}>

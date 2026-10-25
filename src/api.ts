@@ -28,7 +28,35 @@ export type ClipInfo = {
   hasAudio: boolean;
   creationTime: string | null;
   browserPlayable: boolean;
+  /** Cámara que lo grabó ("Osmo Action 5 Pro"), según sus metadatos. */
+  device: string | null;
+  /** Perfil de color con el que se grabó, de los metadatos de DJI. */
+  colorMode: ColorMode | null;
+  /** LUT oficial que lo lleva a Rec.709, si se grabó en un perfil logarítmico. */
+  suggestedLut: string | null;
+  /** Video 360 (una pista por lente); `width`×`height` es la vista 16:9 que se saca. */
+  pano: boolean;
 };
+
+/** Vista de un video 360 (grados); misma forma que `View360` de gl.ts y render.rs. */
+export type View360 = { yaw: number; pitch: number; roll: number; fov: number; mode: "flat" | "planet" };
+
+export type ColorMode = "normal" | "d-cinelike" | "d-log" | "d-log-m" | "d-log2" | "hlg";
+
+export const COLOR_MODE_NAMES: Record<ColorMode, string> = {
+  normal: "Normal",
+  "d-cinelike": "D-Cinelike",
+  "d-log": "D-Log",
+  "d-log-m": "D-Log M",
+  "d-log2": "D-Log2",
+  hlg: "HLG",
+};
+
+/** Una LUT: las oficiales de DJI vienen con la app; las extra las agrega el usuario. */
+export type Lut = { id: string; name: string; detail: string; builtin: boolean };
+
+/** Paquete de estilos creativos de DJI para descargar. */
+export type LutPack = { id: string; name: string; installed: boolean };
 
 export type CameraDrive = { root: string; dcim: string; label: string; removable: boolean };
 
@@ -38,8 +66,6 @@ export type Settings = {
   libraryDir: string;
   ffmpegDir: string | null;
   ffmpegError: string | null;
-  lutName: string | null;
-  lutSize: number | null;
   /** null si ffmpeg no está disponible. */
   hardware: Hardware | null;
   platform: "windows" | "macos" | "linux" | string;
@@ -71,7 +97,10 @@ export type TimelineItem = {
   name: string;
   inPoint: number;
   outPoint: number;
-  applyLut: boolean;
+  /** LUT que convierte el perfil de la cámara a Rec.709 (ID de `Lut`), o null. */
+  lut: string | null;
+  /** Estilo creativo que se aplica después (una LUT extra), o null. */
+  look: string | null;
   hasAudio: boolean;
   /** 1 = normal, 0.25 = cuatro veces más lento. */
   speed: number;
@@ -80,6 +109,8 @@ export type TimelineItem = {
   /** Qué parte de la imagen queda al recortar (0 izquierda/arriba, 1 derecha/abajo). */
   cropX: number;
   cropY: number;
+  /** Solo en videos 360: hacia dónde mira el clip. */
+  view: View360 | null;
   info: ClipInfo;
 };
 
@@ -102,7 +133,13 @@ export type ExportSettings = {
 
 export type ExportProgress = { secondsDone: number; secondsTotal: number; speed: string | null };
 
-export type NearbyCamera = { id: string; name: string; model: string };
+/** Qué tan probada está la conexión por Wi-Fi de un modelo. */
+export type WifiSupport = "tested" | "compatible" | "untested" | "unsupported";
+
+/** Forma de la cámara: de acción, de mano con estabilizador o 360. */
+export type DeviceFamily = "action" | "pocket" | "pano";
+
+export type NearbyCamera = { id: string; name: string; model: string; family: DeviceFamily | null; wifi: WifiSupport | null };
 
 /** Cámaras encendidas cerca, detectadas por Bluetooth. */
 export type Nearby = { bluetoothError: string | null; cameras: NearbyCamera[] };
@@ -111,8 +148,12 @@ export const api = {
   getSettings: () => invoke<Settings>("get_settings"),
   setLibraryDir: (path: string) => invoke<Settings>("set_library_dir", { path }),
   setFfmpegDir: (path: string | null) => invoke<Settings>("set_ffmpeg_dir", { path }),
-  setLut: (path: string) => invoke<Settings>("set_lut", { path }),
-  clearLut: () => invoke<Settings>("clear_lut"),
+  listLuts: () => invoke<Lut[]>("list_luts"),
+  importLut: (path: string) => invoke<Lut[]>("import_lut", { path }),
+  removeLut: (id: string) => invoke<Lut[]>("remove_lut", { id }),
+  lutPacks: () => invoke<LutPack[]>("lut_packs"),
+  /** Descarga un paquete de estilos de DJI y devuelve todas las LUT. */
+  downloadLutPack: (id: string) => invoke<Lut[]>("download_lut_pack", { id }),
   cameraDrives: () => invoke<CameraDrive[]>("list_camera_drives"),
   scanFolder: (path: string) => invoke<MediaFile[]>("scan_folder", { path }),
   libraryFiles: () => invoke<MediaFile[]>("library_files"),
@@ -120,21 +161,25 @@ export const api = {
   startImport: (paths: string[]) => invoke<ImportSummary>("start_import", { paths }),
   cancelImport: () => invoke<void>("cancel_import"),
   thumbnail: (path: string) => invoke<string>("thumbnail", { path }),
-  compareFrames: (path: string, at: number) =>
-    invoke<{ before: string; after: string | null }>("compare_frames", { path, at }),
+  compareFrames: (path: string, at: number, lut: string | null, look: string | null, view: View360 | null) =>
+    invoke<{ before: string; after: string | null }>("compare_frames", { path, at, lut, look, view }),
+  /** El texto `.cube` de una LUT, para aplicarla en la GPU. */
+  lutFile: (id: string) => invoke<ArrayBuffer>("lut_file", { id }),
   previewSource: (path: string, forceProxy = false) => invoke<string>("preview_source", { path, forceProxy }),
   startExport: (items: TimelineItem[], settings: ExportSettings) =>
     invoke<string>("start_export", {
-      items: items.map(({ path, inPoint, outPoint, applyLut, hasAudio, speed, volume, cropX, cropY }) => ({
+      items: items.map(({ path, inPoint, outPoint, lut, look, hasAudio, speed, volume, cropX, cropY, view }) => ({
         path,
         inPoint,
         outPoint,
-        applyLut,
+        lut,
+        look,
         hasAudio,
         speed,
         volume,
         cropX,
         cropY,
+        view,
       })),
       settings,
     }),
@@ -184,6 +229,11 @@ export function cameraUrl(remotePath: string): string {
 export function joinPath(base: string, ...parts: string[]): string {
   const sep = base.includes("\\") ? "\\" : "/";
   return [base.replace(/[\\/]+$/, ""), ...parts].join(sep);
+}
+
+/** Video 360 de la Osmo 360 (se sabe por la extensión, sin analizarlo). */
+export function isPanoFile(f: { name: string }): boolean {
+  return /\.osv$/i.test(f.name);
 }
 
 export function baseName(path: string): string {
