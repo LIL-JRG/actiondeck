@@ -12,14 +12,19 @@ import {
   onExportProgress,
   type ClipInfo,
   type Codec,
+  COLOR_MODE_NAMES,
+  type Lut,
   type Encoder,
   type ExportProgress,
   type Fit,
   type MediaFile,
   type Settings,
   type TimelineItem,
+  type View360,
 } from "./api";
 import { Filmstrip } from "./Filmstrip";
+import { clampFov, DEFAULT_VIEW, PLANET_VIEW } from "./gl";
+import { GLVideo } from "./GLVideo";
 import { describeClip, formatDuration, formatTime } from "./format";
 import {
   AspectIcon,
@@ -29,11 +34,13 @@ import {
   DownloadIcon,
   LogIcon,
   MuteIcon,
+  PaletteIcon,
   PauseIcon,
   PlayIcon,
   PlusIcon,
   ScissorsIcon,
   SpeedIcon,
+  SphereIcon,
   SplitIcon,
   TrashIcon,
   VolumeIcon,
@@ -42,7 +49,7 @@ import type { LocalMeta } from "./library";
 import { Sheet } from "./Sheet";
 
 /** Herramientas con panel propio. */
-export type ToolId = "trim" | "speed" | "volume" | "color" | "format";
+export type ToolId = "trim" | "speed" | "volume" | "color" | "filter" | "format" | "pano";
 
 /** Pedido de abrir clips de la biblioteca en el editor (desde el álbum). */
 export type EditRequest = { paths: string[]; tool: ToolId | null; nonce: number };
@@ -65,7 +72,9 @@ const TOOL_LABELS: Record<ToolId, string> = {
   speed: "Velocidad",
   volume: "Volumen",
   color: "Recuperación de color",
+  filter: "Filtro",
   format: "Formato",
+  pano: "Vista 360",
 };
 
 const spring = { type: "spring", stiffness: 420, damping: 36 } as const;
@@ -83,20 +92,30 @@ function formatSpeed(speed: number): string {
   return `${speed}×`;
 }
 
-/** Un clip completo de la biblioteca, con los ajustes por defecto. */
-export function newItem(file: MediaFile, info: ClipInfo, hasLut: boolean): TimelineItem {
+/** "DJI OSMO Action 5 Pro Mei" → "Mei": el nombre del estilo sin la cámara. */
+export function shortLutName(name: string): string {
+  return name.replace(/^DJI OSMO (Action \d+( Pro)?|Pocket \d+( Pro)?|Nano|360) /i, "");
+}
+
+/**
+ * Un clip completo de la biblioteca, con los ajustes por defecto. Si se grabó
+ * en un perfil logarítmico, ya trae la LUT oficial de su cámara.
+ */
+export function newItem(file: MediaFile, info: ClipInfo): TimelineItem {
   return {
     id: crypto.randomUUID(),
     path: file.path,
     name: file.name,
     inPoint: 0,
     outPoint: info.duration,
-    applyLut: hasLut,
+    lut: info.suggestedLut,
+    look: null,
     hasAudio: info.hasAudio,
     speed: 1,
     volume: 1,
     cropX: 0.5,
     cropY: 0.5,
+    view: info.pano ? DEFAULT_VIEW : null,
     info,
   };
 }
@@ -105,6 +124,7 @@ type Props = {
   /** La pestaña está a la vista (al salir se pausa el video). */
   active: boolean;
   settings: Settings;
+  luts: Lut[];
   library: MediaFile[];
   meta: LocalMeta;
   timeline: TimelineItem[];
@@ -114,8 +134,7 @@ type Props = {
   onError: (message: string) => void;
 };
 
-export function EditView({ active, settings, library, meta, timeline, setTimeline, request, onGoSettings, onError }: Props) {
-  const hasLut = settings.lutName !== null;
+export function EditView({ active, settings, luts, library, meta, timeline, setTimeline, request, onGoSettings, onError }: Props) {
   const [selectedId, setSelectedId] = useState<string | null>(timeline[0]?.id ?? null);
   const [tool, setTool] = useState<ToolId | null>(null);
   // Formato y encuadre son del proyecto: los usan el marco de recorte y la exportación.
@@ -148,7 +167,7 @@ export function EditView({ active, settings, library, meta, timeline, setTimelin
           continue;
         }
       }
-      items.push(newItem(file, info, hasLut));
+      items.push(newItem(file, info));
     }
     if (items.length === 0) return;
     setTimeline((prev) => [...prev, ...items]);
@@ -239,7 +258,9 @@ export function EditView({ active, settings, library, meta, timeline, setTimelin
             item={selected}
             videoRef={videoRef}
             cropRatio={fit === "crop" ? targetRatio : null}
+            frameRatio={targetRatio}
             onCrop={(cropX, cropY) => update({ cropX, cropY })}
+            onView={(view) => update({ view })}
             onTrim={(inPoint, outPoint) => update({ inPoint, outPoint })}
             onTime={setCurrent}
           />
@@ -250,7 +271,7 @@ export function EditView({ active, settings, library, meta, timeline, setTimelin
             setTool={setTool}
             current={current}
             canSplit={canSplit}
-            hasLut={hasLut}
+            luts={luts}
             format={format}
             setFormat={setFormat}
             fit={fit}
@@ -351,14 +372,19 @@ function ClipStage({
   item,
   videoRef,
   cropRatio,
+  frameRatio,
   onCrop,
+  onView,
   onTrim,
   onTime,
 }: {
   item: TimelineItem;
   videoRef: RefObject<HTMLVideoElement | null>;
   cropRatio: number | null;
+  /** Formato del video final: un 360 se ve directamente así. */
+  frameRatio: number | null;
   onCrop: (x: number, y: number) => void;
+  onView: (view: View360) => void;
   onTrim: (inPoint: number, outPoint: number) => void;
   onTime: (t: number) => void;
 }) {
@@ -415,13 +441,16 @@ function ClipStage({
     }
   };
 
-  const sourceRatio = clipRatio(item.info);
+  const pano = item.info.pano;
+  const view = pano ? (item.view ?? DEFAULT_VIEW) : null;
+  // Un 360 no tiene un encuadre propio: se ve ya en el formato final.
+  const sourceRatio = pano ? (frameRatio ?? 16 / 9) : clipRatio(item.info);
   const frame = (() => {
     const { width, height } = stageSize;
     if (!width || !height) return null;
     return width / height > sourceRatio ? { width: height * sourceRatio, height } : { width, height: width / sourceRatio };
   })();
-  const showCrop = cropRatio !== null && Math.abs(cropRatio - sourceRatio) > 0.01;
+  const showCrop = !pano && cropRatio !== null && Math.abs(cropRatio - sourceRatio) > 0.01;
   const lowRes = !!preview && preview !== item.path;
 
   const toggle = () => {
@@ -436,21 +465,26 @@ function ClipStage({
       <div className="editor-stage" ref={stageRef} onClick={toggle}>
         {preview && frame ? (
           <div className="frame" style={{ width: frame.width, height: frame.height }}>
-            <video
-              ref={videoRef}
+            <GLVideo
               src={fileUrl(preview)}
-              onTimeUpdate={onTimeUpdate}
-              onSeeked={onTimeUpdate}
-              onLoadedMetadata={onLoaded}
-              onPlay={() => setPlaying(true)}
-              onPause={() => setPlaying(false)}
-              onError={() => (forceProxy ? setPreviewError("No se pudo reproducir la vista previa.") : setForceProxy(true))}
-              preload="auto"
-              playsInline
-            />
-            {showCrop && cropRatio !== null && (
-              <CropFrame sourceRatio={sourceRatio} targetRatio={cropRatio} x={item.cropX} y={item.cropY} onMove={onCrop} />
-            )}
+              videoRef={videoRef}
+              lut={item.lut}
+              look={item.look}
+              view={view}
+              onView={pano ? onView : undefined}
+              videoProps={{
+                onTimeUpdate,
+                onSeeked: onTimeUpdate,
+                onLoadedMetadata: onLoaded,
+                onPlay: () => setPlaying(true),
+                onPause: () => setPlaying(false),
+                onError: () => (forceProxy ? setPreviewError("No se pudo reproducir la vista previa.") : setForceProxy(true)),
+              }}
+            >
+              {showCrop && cropRatio !== null && (
+                <CropFrame sourceRatio={sourceRatio} targetRatio={cropRatio} x={item.cropX} y={item.cropY} onMove={onCrop} />
+              )}
+            </GLVideo>
           </div>
         ) : (
           <div className="stage-status">
@@ -458,7 +492,8 @@ function ClipStage({
             {!previewError && !item.info.browserPlayable && <p className="hint small">Preparando vista previa ligera…</p>}
           </div>
         )}
-        {lowRes && <span className="stage-tag">Baja res.</span>}
+        {lowRes && <span className="stage-tag">{pano ? "360 · Baja res." : "Baja res."}</span>}
+        {pano && !playing && preview && <span className="stage-hint">Arrastra para mirar alrededor · rueda para acercar</span>}
         <AnimatePresence>
           {!playing && preview && (
             <motion.span
@@ -482,6 +517,7 @@ function ClipStage({
           videoRef={videoRef}
           src={preview ? fileUrl(preview) : null}
           duration={item.info.duration}
+          look={{ lut: item.lut, look: item.look, view }}
           trim={{
             inPoint: item.inPoint,
             outPoint: item.outPoint,
@@ -566,12 +602,14 @@ function CropFrame({
   );
 }
 
-const BAR_TOOLS: { id: ToolId | "split" | "remove"; label: string; icon: typeof ScissorsIcon }[] = [
+const BAR_TOOLS: { id: ToolId | "split" | "remove"; label: string; icon: typeof ScissorsIcon; only360?: boolean }[] = [
+  { id: "pano", label: "Vista 360", icon: SphereIcon, only360: true },
   { id: "trim", label: "Recortar", icon: ScissorsIcon },
   { id: "split", label: "Dividir", icon: SplitIcon },
   { id: "speed", label: "Velocidad", icon: SpeedIcon },
   { id: "volume", label: "Volumen", icon: VolumeIcon },
   { id: "color", label: "Recuperación de color", icon: LogIcon },
+  { id: "filter", label: "Filtro", icon: PaletteIcon },
   { id: "format", label: "Formato", icon: AspectIcon },
   { id: "remove", label: "Quitar", icon: TrashIcon },
 ];
@@ -583,7 +621,7 @@ function EditorBar({
   setTool,
   current,
   canSplit,
-  hasLut,
+  luts,
   format,
   setFormat,
   fit,
@@ -600,7 +638,7 @@ function EditorBar({
   setTool: (t: ToolId | null) => void;
   current: number;
   canSplit: boolean;
-  hasLut: boolean;
+  luts: Lut[];
   format: FrameFormat;
   setFormat: (f: FrameFormat) => void;
   fit: Fit;
@@ -618,7 +656,7 @@ function EditorBar({
   const runCompare = async () => {
     setComparing(true);
     try {
-      const pair = await api.compareFrames(item.path, current);
+      const pair = await api.compareFrames(item.path, current, item.lut, item.look, item.view);
       setCompare({ ...pair, stamp: Date.now() });
     } catch (e) {
       onError(errorText(e));
@@ -627,6 +665,8 @@ function EditorBar({
     }
   };
 
+  const official = luts.filter((l) => l.builtin);
+  const extras = luts.filter((l) => !l.builtin);
   const length = item.outPoint - item.inPoint;
   const slowMotionNote =
     item.speed < 1
@@ -648,12 +688,13 @@ function EditorBar({
             exit={{ opacity: 0, y: 10 }}
             transition={{ duration: 0.16 }}
           >
-            {BAR_TOOLS.map((t) => {
+            {BAR_TOOLS.filter((t) => !t.only360 || item.info.pano).map((t) => {
               const disabled = t.id === "split" && !canSplit;
               const active =
                 (t.id === "speed" && item.speed !== 1) ||
                 (t.id === "volume" && item.volume !== 1) ||
-                (t.id === "color" && item.applyLut) ||
+                (t.id === "color" && item.lut !== null) ||
+                (t.id === "filter" && item.look !== null) ||
                 (t.id === "trim" && (item.inPoint > 0 || item.outPoint < item.info.duration));
               return (
                 <button
@@ -759,27 +800,98 @@ function EditorBar({
 
             {tool === "color" && (
               <div className="tool-body">
-                {hasLut ? (
+                <label className="switch-row">
+                  <span>
+                    <strong>Recuperar color</strong>
+                    <span className="hint small">{profileText(item.info)}</span>
+                  </span>
+                  <Switch
+                    checked={item.lut !== null}
+                    onChange={(on) => update({ lut: on ? (item.info.suggestedLut ?? official[0]?.id ?? null) : null })}
+                  />
+                </label>
+                {item.lut !== null && (
+                  <select className="select" value={item.lut} onChange={(e) => update({ lut: e.target.value })} aria-label="LUT">
+                    {official.map((l) => (
+                      <option key={l.id} value={l.id}>
+                        {l.name} · {l.detail}
+                        {l.id === item.info.suggestedLut ? " (la de esta cámara)" : ""}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                <button className="chip" onClick={runCompare} disabled={comparing || (item.lut === null && item.look === null)}>
+                  <CompareIcon size={18} /> {comparing ? "Generando…" : `Antes y después en ${formatTime(current)}`}
+                </button>
+              </div>
+            )}
+
+            {tool === "filter" && (
+              <div className="tool-body column">
+                {extras.length === 0 ? (
                   <>
-                    <label className="switch-row">
-                      <span>
-                        <strong>Recuperar color</strong>
-                        <span className="hint small">Aplica la LUT de D-Log M a Rec.709</span>
-                      </span>
-                      <Switch checked={item.applyLut} onChange={(applyLut) => update({ applyLut })} />
-                    </label>
-                    <button className="chip" onClick={runCompare} disabled={comparing}>
-                      <CompareIcon size={18} /> {comparing ? "Generando…" : `Antes y después en ${formatTime(current)}`}
+                    <p className="hint">
+                      Los filtros son LUT extra: descarga los estilos de DJI o importa tus propios .cube en Ajustes.
+                    </p>
+                    <button className="chip" onClick={onGoSettings}>
+                      Conseguir filtros
                     </button>
                   </>
                 ) : (
                   <>
-                    <p className="hint">Para recuperar el color del D-Log M, elige primero la LUT oficial de DJI.</p>
-                    <button className="chip" onClick={onGoSettings}>
-                      Elegir LUT en Ajustes
-                    </button>
+                    <ChipGroup
+                      options={[{ id: "", label: "Ninguno" }, ...extras.map((l) => ({ id: l.id, label: shortLutName(l.name) }))]}
+                      value={item.look ?? ""}
+                      onChange={(id) => update({ look: id || null })}
+                      layoutId="look-chip"
+                    />
+                    <div className="row">
+                      <button className="chip" onClick={runCompare} disabled={comparing || (item.lut === null && item.look === null)}>
+                        <CompareIcon size={18} /> {comparing ? "Generando…" : `Antes y después en ${formatTime(current)}`}
+                      </button>
+                      <button className="link" onClick={onGoSettings}>
+                        Más filtros
+                      </button>
+                    </div>
                   </>
                 )}
+              </div>
+            )}
+
+            {tool === "pano" && item.view && (
+              <div className="tool-body column">
+                <ChipGroup
+                  options={[
+                    { id: "flat", label: "Normal" },
+                    { id: "planet", label: "Pequeño planeta" },
+                  ]}
+                  value={item.view.mode}
+                  onChange={(mode) =>
+                    update({ view: { ...(mode === "planet" ? PLANET_VIEW : DEFAULT_VIEW), yaw: item.view?.yaw ?? 0 } })
+                  }
+                  layoutId="pano-mode"
+                />
+                <div className="row center">
+                  <span className="hint small">Campo de visión</span>
+                  <input
+                    className="slider"
+                    type="range"
+                    min={item.view.mode === "planet" ? 120 : 30}
+                    max={item.view.mode === "planet" ? 330 : 150}
+                    value={Math.round(item.view.fov)}
+                    onChange={(e) => item.view && update({ view: { ...item.view, fov: clampFov(item.view, Number(e.target.value)) } })}
+                    aria-label="Campo de visión"
+                    style={{ ["--fill" as string]: `${fovFill(item.view)}%` }}
+                  />
+                  <span className="slider-value">{Math.round(item.view.fov)}°</span>
+                  <button className="chip" onClick={() => item.view && update({ view: { ...item.view, yaw: 0, pitch: item.view.mode === "planet" ? -90 : 0, roll: 0 } })}>
+                    Al frente
+                  </button>
+                  <button className="chip" onClick={() => item.view && update({ view: { ...item.view, yaw: 180, pitch: item.view.mode === "planet" ? -90 : 0, roll: 0 } })}>
+                    Atrás
+                  </button>
+                </div>
+                <p className="hint small">Arrastra el video para mirar alrededor; con la rueda acercas o alejas.</p>
               </div>
             )}
 
@@ -829,6 +941,19 @@ function EditorBar({
       )}
     </div>
   );
+}
+
+/** Qué tanto del deslizador del campo de visión va lleno (0-100). */
+function fovFill(view: View360): number {
+  const [min, max] = view.mode === "planet" ? [120, 330] : [30, 150];
+  return ((view.fov - min) / (max - min)) * 100;
+}
+
+/** "Grabado en D-Log M con la Osmo Action 5 Pro" y si necesita conversión. */
+function profileText(info: ClipInfo): string {
+  if (!info.colorMode) return "No pude leer el perfil de color de este clip.";
+  const where = `Grabado en ${COLOR_MODE_NAMES[info.colorMode]}${info.device ? ` con la ${info.device}` : ""}`;
+  return info.suggestedLut ? `${where}: se convierte con la LUT oficial de DJI.` : `${where}: no necesita conversión.`;
 }
 
 /** Antes y después con una cortina que se arrastra. */
@@ -948,7 +1073,8 @@ function ProjectStrip({
               <span className="project-badges">
                 {item.speed !== 1 && <em>{formatSpeed(item.speed)}</em>}
                 {item.hasAudio && item.volume === 0 && <MuteIcon size={14} />}
-                {item.applyLut && <em>LUT</em>}
+                {item.lut && <em>LUT</em>}
+                {item.look && <em>Filtro</em>}
               </span>
               <span className="project-length">{formatTime(outputDuration(item))}</span>
             </Reorder.Item>
@@ -1116,8 +1242,7 @@ function ExportSheet({
   const effectiveFit = reframes ? fit : "crop";
   const out = first && ratio ? outputSize(first, ratio, effectiveFit, size) : null;
   const frameRate = fps === "source" ? (first ? Math.round(first.fps * 1000) / 1000 : 30) : Number(fps);
-  const needsLut = timeline.some((t) => t.applyLut);
-  const blocked = timeline.length === 0 || !out || (needsLut && !settings.lutName) || !!settings.ffmpegError;
+  const blocked = timeline.length === 0 || !out || !!settings.ffmpegError;
   const total = timeline.reduce((sum, i) => sum + outputDuration(i), 0);
 
   const run = async () => {
@@ -1248,7 +1373,6 @@ function ExportSheet({
           </select>
         </Field>
 
-        {needsLut && !settings.lutName && <p className="warning">Hay clips con color recuperado pero no hay LUT elegida en Ajustes.</p>}
         {settings.ffmpegError && <p className="warning">{settings.ffmpegError}</p>}
       </div>
 

@@ -108,6 +108,13 @@ impl CameraWifi {
             .pop()
             .or_else(|| others.into_iter().next())
             .ok_or("No encontré la cámara. Enciéndela y acércala a la computadora.")?;
+        let device = crate::devices::by_name(camera.model).or_else(|| crate::devices::by_name(&camera.name));
+        if let Some(d) = device.filter(|d| d.wifi == crate::devices::Wifi::Unsupported) {
+            return Err(format!(
+                "La {} todavía no se puede conectar por Wi-Fi. Conéctala por USB-C o mete su microSD en un lector.",
+                d.name
+            ));
+        }
 
         phase(app, "Despertando la cámara…");
         let approval_app = app.clone();

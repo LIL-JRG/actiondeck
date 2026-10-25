@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use super::ble::{looks_dji, model_from_name, model_name, parse_advert};
+use crate::devices::{self, Family, Wifi};
 
 /// Sin anuncios durante este tiempo, la cámara se da por apagada.
 pub const LOST_AFTER: Duration = Duration::from_secs(12);
@@ -27,6 +28,10 @@ pub struct NearbyCamera {
     /// Nombre que anuncia, p. ej. `OsmoAction5Pro675D`.
     pub name: String,
     pub model: String,
+    /// Forma de la cámara, para dibujarla; `None` si el modelo no se conoce.
+    pub family: Option<Family>,
+    /// Qué tan probada está su conexión por Wi-Fi.
+    pub wifi: Option<Wifi>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Default)]
@@ -134,10 +139,13 @@ async fn identify(central: &Adapter, id: &PeripheralId) -> Option<NearbyCamera> 
         .map(model_name)
         .or_else(|| model_from_name(&name))
         .unwrap_or("Cámara DJI");
+    let device = devices::by_name(model);
     Some(NearbyCamera {
         id: id.to_string(),
         name: if name.is_empty() { model.to_string() } else { name },
         model: model.to_string(),
+        family: device.map(|d| d.family),
+        wifi: device.map(|d| d.wifi),
     })
 }
 
@@ -146,7 +154,13 @@ mod tests {
     use super::*;
 
     fn cam(id: &str) -> NearbyCamera {
-        NearbyCamera { id: id.into(), name: format!("OsmoAction5Pro{id}"), model: "Osmo Action 5 Pro".into() }
+        NearbyCamera {
+            id: id.into(),
+            name: format!("OsmoAction5Pro{id}"),
+            model: "Osmo Action 5 Pro".into(),
+            family: Some(Family::Action),
+            wifi: Some(Wifi::Tested),
+        }
     }
 
     #[test]

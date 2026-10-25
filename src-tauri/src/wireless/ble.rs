@@ -21,6 +21,7 @@ use tokio::time::{sleep, timeout, Instant};
 use uuid::Uuid;
 
 use super::config::WirelessConfig;
+use crate::devices;
 use super::duml::{self, addr, hex, Frame, Reassembler};
 use super::log::{redact, Log};
 
@@ -33,33 +34,13 @@ const WRITE_GAP: Duration = Duration::from_millis(120);
 
 /// Nombre del modelo según el ID que anuncia (osmosis BleConstants.kt).
 pub fn model_name(id: u16) -> &'static str {
-    match id {
-        0x0006 => "Osmo Action",
-        0x0010 => "Osmo Action 2",
-        0x0012 => "Osmo Action 3",
-        0x0014 => "Osmo Action 4",
-        0x0015 => "Osmo Action 5 Pro",
-        0x0017 => "Osmo 360",
-        0x0018 => "Osmo Action 6",
-        0x0019 => "Osmo Nano",
-        0x0020 => "Osmo Pocket 3",
-        0x0021 => "Osmo Pocket 4",
-        0x0022 => "Osmo Pocket 4 Pro",
-        _ => "Dispositivo DJI desconocido",
-    }
+    devices::by_ble_id(id).map_or("Dispositivo DJI desconocido", |d| d.name)
 }
 
-const KNOWN_MODELS: [u16; 11] = [0x0006, 0x0010, 0x0012, 0x0014, 0x0015, 0x0017, 0x0018, 0x0019, 0x0020, 0x0021, 0x0022];
-
 /// Modelo según el nombre anunciado (`OsmoAction5Pro675D`), para cuando aún
-/// no llegan los datos del fabricante. Gana el más largo: "Osmo Action 5 Pro"
-/// y no "Osmo Action".
+/// no llegan los datos del fabricante.
 pub fn model_from_name(name: &str) -> Option<&'static str> {
-    KNOWN_MODELS
-        .iter()
-        .map(|&id| model_name(id))
-        .filter(|model| name.starts_with(&model.replace(' ', "")))
-        .max_by_key(|model| model.len())
+    devices::by_name(name).map(|d| d.name)
 }
 
 #[derive(Clone, Debug)]

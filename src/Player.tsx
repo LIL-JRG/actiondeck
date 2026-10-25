@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { api, cameraUrl, fileUrl, type MediaFile } from "./api";
+import { api, cameraUrl, COLOR_MODE_NAMES, fileUrl, isPanoFile, type MediaFile, type View360 } from "./api";
 import type { ToolId } from "./EditView";
 import { Filmstrip } from "./Filmstrip";
+import { DEFAULT_VIEW, PLANET_VIEW } from "./gl";
+import { GLVideo } from "./GLVideo";
 import { describeClip, formatBytes, formatDate, formatDuration } from "./format";
 import {
   AspectIcon,
@@ -12,6 +14,7 @@ import {
   DownloadIcon,
   InfoIcon,
   LogIcon,
+  PaletteIcon,
   PauseIcon,
   PlayIcon,
   ScissorsIcon,
@@ -40,6 +43,7 @@ const TOOLS: { id: ToolId; label: string; icon: typeof ScissorsIcon }[] = [
   { id: "trim", label: "Recortar", icon: ScissorsIcon },
   { id: "speed", label: "Velocidad", icon: SpeedIcon },
   { id: "color", label: "Recuperación de color", icon: LogIcon },
+  { id: "filter", label: "Filtro", icon: PaletteIcon },
   { id: "volume", label: "Volumen", icon: VolumeIcon },
   { id: "format", label: "Formato", icon: AspectIcon },
 ];
@@ -61,12 +65,16 @@ export function Player({ files, index, wireless, meta, isImported, onMove, onClo
   const [duration, setDuration] = useState<number | null>(null);
   const [showInfo, setShowInfo] = useState(false);
   const [pulse, setPulse] = useState<{ playing: boolean; at: number } | null>(null);
+  // Ver el D-Log M con su color recuperado, como el botón de Mimo.
+  const [colorOn, setColorOn] = useState(true);
+  const [view, setView] = useState<View360>(DEFAULT_VIEW);
 
   useEffect(() => {
     setFailed(null);
     setTriedFallback(false);
     setDuration(durationOf(file, meta));
     setPlaying(false);
+    setView(DEFAULT_VIEW);
     if (wireless) {
       const remote = isVideo ? file.proxyPath : file.thumb;
       setSrc(remote ? cameraUrl(remote) : null);
@@ -131,6 +139,9 @@ export function Player({ files, index, wireless, meta, isImported, onMove, onClo
   const imported = isImported(file);
   const info = meta?.infos[file.path];
   const clipInfo = info && typeof info !== "string" ? info : null;
+  const pano = isVideo && (clipInfo?.pano || isPanoFile(file));
+  const officialLut = wireless ? null : (clipInfo?.suggestedLut ?? null);
+  const lut = colorOn ? officialLut : null;
 
   return (
     <motion.div
@@ -151,6 +162,17 @@ export function Player({ files, index, wireless, meta, isImported, onMove, onClo
         <button className={showInfo ? "round on" : "round"} onClick={() => setShowInfo((s) => !s)} aria-label="Información">
           <InfoIcon size={22} />
         </button>
+        {officialLut && (
+          <button
+            className={colorOn ? "round on" : "round"}
+            onClick={() => setColorOn((on) => !on)}
+            aria-pressed={colorOn}
+            aria-label="Recuperación de color"
+            title={colorOn ? "Viendo el color recuperado (LUT oficial)" : `Viendo el ${COLOR_MODE_NAMES[clipInfo?.colorMode ?? "d-log-m"]} original`}
+          >
+            <LogIcon size={24} />
+          </button>
+        )}
         {lowRes && src && <span className="player-tag">Baja res.</span>}
         <div className="player-heading" data-tauri-drag-region>
           <span className="player-name">{file.name}</span>
@@ -158,6 +180,16 @@ export function Player({ files, index, wireless, meta, isImported, onMove, onClo
             {index + 1} de {files.length}
           </span>
         </div>
+        {pano && (
+          <div className="mini-seg" role="group" aria-label="Vista 360">
+            <button className={view.mode === "flat" ? "on" : ""} onClick={() => setView({ ...DEFAULT_VIEW, yaw: view.yaw })}>
+              Normal
+            </button>
+            <button className={view.mode === "planet" ? "on" : ""} onClick={() => setView({ ...PLANET_VIEW, yaw: view.yaw })}>
+              Pequeño planeta
+            </button>
+          </div>
+        )}
         {onImport &&
           (imported ? (
             <span className="player-done">
@@ -185,25 +217,21 @@ export function Player({ files, index, wireless, meta, isImported, onMove, onClo
             ) : !src ? (
               <span className="spinner large" aria-label="Preparando vista previa" />
             ) : isVideo ? (
-              <video
-                // Al cambiar de archivo, el video anterior sale con una animación
-                // después de que entra el nuevo: no debe borrar la referencia.
-                ref={(el) => {
-                  if (!el) return;
-                  videoRef.current = el;
-                  return () => {
-                    el.pause();
-                    if (videoRef.current === el) videoRef.current = null;
-                  };
-                }}
+              <GLVideo
                 key={src}
                 src={src}
-                autoPlay
-                playsInline
-                onPlay={() => setPlaying(true)}
-                onPause={() => setPlaying(false)}
-                onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
-                onError={onMediaError}
+                videoRef={videoRef}
+                lut={lut}
+                look={null}
+                view={pano ? view : null}
+                onView={pano ? setView : undefined}
+                videoProps={{
+                  autoPlay: true,
+                  onPlay: () => setPlaying(true),
+                  onPause: () => setPlaying(false),
+                  onLoadedMetadata: (e) => setDuration(e.currentTarget.duration),
+                  onError: onMediaError,
+                }}
               />
             ) : (
               <img src={src} alt={file.name} onError={onMediaError} draggable={false} />
@@ -225,6 +253,8 @@ export function Player({ files, index, wireless, meta, isImported, onMove, onClo
             </motion.span>
           )}
         </AnimatePresence>
+
+        {pano && src && !failed && <span className="stage-hint">Arrastra para mirar alrededor · rueda para acercar</span>}
 
         {index > 0 && (
           <button className="stage-nav left" onClick={(e) => (e.stopPropagation(), onMove(index - 1))} aria-label="Anterior">
@@ -265,6 +295,24 @@ export function Player({ files, index, wireless, meta, isImported, onMove, onClo
                     <dd>{describeClip(clipInfo)}</dd>
                   </>
                 )}
+                {clipInfo?.device && (
+                  <>
+                    <dt>Cámara</dt>
+                    <dd>{clipInfo.device}</dd>
+                  </>
+                )}
+                {clipInfo?.colorMode && (
+                  <>
+                    <dt>Perfil</dt>
+                    <dd>{COLOR_MODE_NAMES[clipInfo.colorMode]}</dd>
+                  </>
+                )}
+                {pano && (
+                  <>
+                    <dt>Tipo</dt>
+                    <dd>Video 360 (dos lentes)</dd>
+                  </>
+                )}
                 <dt>Ubicación</dt>
                 <dd>{wireless ? "En la cámara" : imported && onImport ? "En la cámara y en la biblioteca" : "En la computadora"}</dd>
               </dl>
@@ -276,7 +324,7 @@ export function Player({ files, index, wireless, meta, isImported, onMove, onClo
 
       <footer className="player-bottom">
         {isVideo && duration ? (
-          <Filmstrip videoRef={videoRef} src={src} duration={duration} />
+          <Filmstrip videoRef={videoRef} src={src} duration={duration} look={{ lut, look: null, view: pano ? view : null }} />
         ) : (
           <div className="filmstrip-spacer" />
         )}

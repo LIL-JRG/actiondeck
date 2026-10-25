@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import type { NearbyCamera } from "./api";
+import type { DeviceFamily, NearbyCamera } from "./api";
 import { needsApproval, phaseProgress, type Camera } from "./camera";
 import { CheckIcon } from "./icons";
 import { Sheet } from "./Sheet";
@@ -53,7 +53,10 @@ export function DeviceSheet({ open, onClose, camera, onShowFiles }: Props) {
   const title = view === "searching" ? "Buscando cámaras" : target?.name;
   const status: Record<View, string> = {
     searching: nearby.bluetoothError ?? "Enciende tu cámara y acércala a la computadora.",
-    found: `${target?.model ?? "Cámara"} encendida cerca`,
+    found:
+      target?.wifi === "unsupported"
+        ? `La ${target.model} aún no se puede conectar por Wi-Fi`
+        : `${target?.model ?? "Cámara"} encendida cerca`,
     connecting: phase || "Conectando…",
     approval: "Acepta la conexión en la pantalla de la cámara",
     connected: link.status === "connected" ? `Conectado · ${link.files.length} archivos en la cámara` : "Conectado",
@@ -76,7 +79,7 @@ export function DeviceSheet({ open, onClose, camera, onShowFiles }: Props) {
       </AnimatePresence>
 
       <div className="device-art">
-        <CameraArt view={view} />
+        <CameraArt view={view} family={target?.family} />
       </div>
 
       <AnimatePresence mode="wait" initial={false}>
@@ -112,12 +115,25 @@ export function DeviceSheet({ open, onClose, camera, onShowFiles }: Props) {
       </AnimatePresence>
 
       <div className="device-actions">
-        {view === "found" && (
+        {view === "found" && target?.wifi === "unsupported" && (
+          <>
+            <p className="device-note">
+              Conéctala por USB-C (modo de transferencia) o mete su microSD en un lector: sus archivos aparecen en Álbum ›
+              Dispositivo.
+            </p>
+            <button className="pill dark large wide" onClick={onClose}>
+              Entendido
+            </button>
+          </>
+        )}
+        {view === "found" && target?.wifi !== "unsupported" && (
           <>
             <button className="pill dark large wide" onClick={connect}>
               Conectar
             </button>
             <p className="device-note">
+              {(target?.wifi === "untested" || target?.wifi == null) &&
+                "Aún no se ha probado la conexión con este modelo, pero usa el mismo sistema que la Action 5 Pro. "}
               Para ver y bajar tus videos, la computadora se une a la red Wi-Fi de la cámara. Mientras tanto no tiene
               internet por Wi-Fi.
             </p>
@@ -177,7 +193,7 @@ export function DeviceSheet({ open, onClose, camera, onShowFiles }: Props) {
  * Una cámara de acción dibujada (no es la foto del producto): flota, emite
  * ondas mientras busca, arcos de Wi-Fi mientras se conecta y un ✓ al final.
  */
-export function CameraArt({ view, size = 300 }: { view: View | "idle"; size?: number }) {
+export function CameraArt({ view, family, size = 300 }: { view: View | "idle"; family?: DeviceFamily | null; size?: number }) {
   const on = view !== "searching" && view !== "idle";
   return (
     <div className="camera-art" style={{ width: size, height: size * 0.72 }}>
@@ -224,57 +240,13 @@ export function CameraArt({ view, size = 300 }: { view: View | "idle"; size?: nu
             </filter>
           </defs>
 
-          {/* Soportes laterales */}
-          <path d="M78 82c-30 0-44 14-44 34s14 34 44 34" fill="none" stroke="#dedede" strokeWidth="14" strokeLinecap="round" />
-          <path d="M242 82c30 0 44 14 44 34s-14 34-44 34" fill="none" stroke="#dedede" strokeWidth="14" strokeLinecap="round" />
-
-          {/* Cuerpo */}
-          <rect x="66" y="46" width="188" height="132" rx="24" fill="url(#art-body)" />
-          <rect x="66" y="46" width="188" height="132" rx="24" fill="none" stroke="#5c5c61" strokeOpacity="0.6" />
-          <path d="M90 47h140" stroke="#8a8a90" strokeOpacity="0.5" strokeWidth="1.5" strokeLinecap="round" />
-          <rect x="226" y="40" width="20" height="7" rx="3.5" fill="#3a3a3e" />
-          <rect x="70" y="160" width="180" height="16" rx="8" fill="#141416" opacity="0.7" />
-
-          {/* Pantalla frontal */}
-          <rect x="82" y="64" width="80" height="92" rx="11" fill="#0b0b0d" />
-          <motion.rect
-            x="87"
-            y="69"
-            width="70"
-            height="82"
-            rx="7"
-            fill={on ? "url(#art-screen)" : "#141418"}
-            animate={view === "approval" ? { opacity: [1, 0.55, 1] } : { opacity: 1 }}
-            transition={view === "approval" ? { duration: 1.1, repeat: Infinity } : { duration: 0.3 }}
-          />
-          {on && view !== "approval" && (
-            <g fill="#fff" fontFamily="-apple-system, system-ui, sans-serif" fontWeight="600">
-              <text x="93" y="81" fontSize="7" opacity="0.9">
-                1h03m
-              </text>
-              <rect x="140" y="75" width="11" height="6" rx="1.5" fill="none" stroke="#fff" strokeWidth="1" />
-              <rect x="141.5" y="76.5" width="6" height="3" rx="0.5" />
-              <text x="93" y="144" fontSize="7" opacity="0.9">
-                4K60
-              </text>
-              <circle cx="146" cy="141.5" r="3" fill="#ff453a" />
-            </g>
+          {family === "pocket" ? (
+            <PocketBody on={on} approval={view === "approval"} />
+          ) : family === "pano" ? (
+            <PanoBody on={on} approval={view === "approval"} />
+          ) : (
+            <ActionBody on={on} approval={view === "approval"} />
           )}
-          {view === "approval" && (
-            <g stroke="#fff" strokeWidth="3" fill="none" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="122" cy="110" r="16" strokeOpacity="0.9" />
-              <path d="m114 110 6 6 10-11" />
-            </g>
-          )}
-
-          {/* Lente */}
-          <circle cx="206" cy="108" r="44" fill="#232326" />
-          <circle cx="206" cy="108" r="44" fill="none" stroke="#3b3b40" strokeWidth="2" />
-          <circle cx="206" cy="108" r="37" fill="#101012" />
-          <circle cx="206" cy="108" r="32" fill="none" stroke="#d6312b" strokeWidth="2.2" />
-          <circle cx="206" cy="108" r="26" fill="url(#art-glass)" />
-          <ellipse cx="197" cy="98" rx="8" ry="5" fill="#fff" opacity="0.28" filter="url(#art-soft)" transform="rotate(-30 197 98)" />
-          <circle cx="213" cy="116" r="2.2" fill="#fff" opacity="0.18" />
         </svg>
 
         <AnimatePresence>
@@ -313,5 +285,121 @@ export function CameraArt({ view, size = 300 }: { view: View | "idle"; size?: nu
         transition={{ duration: 3.4, repeat: Infinity, ease: "easeInOut" }}
       />
     </div>
+  );
+}
+
+type BodyProps = { on: boolean; approval: boolean };
+
+/** Pantalla encendida (con datos de grabación) o pidiendo aceptar la conexión. */
+function Screen({ x, y, w, h, on, approval }: BodyProps & { x: number; y: number; w: number; h: number }) {
+  const small = Math.min(w, h);
+  return (
+    <>
+      <rect x={x - 5} y={y - 5} width={w + 10} height={h + 10} rx={11} fill="#0b0b0d" />
+      <motion.rect
+        x={x}
+        y={y}
+        width={w}
+        height={h}
+        rx={7}
+        fill={on ? "url(#art-screen)" : "#141418"}
+        animate={approval ? { opacity: [1, 0.55, 1] } : { opacity: 1 }}
+        transition={approval ? { duration: 1.1, repeat: Infinity } : { duration: 0.3 }}
+      />
+      {on && !approval && (
+        <g fill="#fff" fontFamily="-apple-system, system-ui, sans-serif" fontWeight="600">
+          <text x={x + 6} y={y + 12} fontSize="7" opacity="0.9">
+            1h03m
+          </text>
+          <rect x={x + w - 17} y={y + 6} width="11" height="6" rx="1.5" fill="none" stroke="#fff" strokeWidth="1" />
+          <rect x={x + w - 15.5} y={y + 7.5} width="6" height="3" rx="0.5" />
+          <text x={x + 6} y={y + h - 7} fontSize="7" opacity="0.9">
+            4K60
+          </text>
+          <circle cx={x + w - 11} cy={y + h - 9.5} r="3" fill="#ff453a" />
+        </g>
+      )}
+      {approval && (
+        <g stroke="#fff" strokeWidth="3" fill="none" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx={x + w / 2} cy={y + h / 2} r={small * 0.24} strokeOpacity="0.9" />
+          <path
+            d={`m${x + w / 2 - small * 0.12} ${y + h / 2} ${small * 0.09} ${small * 0.09} ${small * 0.15} ${-small * 0.17}`}
+          />
+        </g>
+      )}
+    </>
+  );
+}
+
+/** Lente con el anillo rojo de los Osmo. */
+function Lens({ cx, cy, r }: { cx: number; cy: number; r: number }) {
+  const k = r / 44;
+  return (
+    <>
+      <circle cx={cx} cy={cy} r={r} fill="#232326" />
+      <circle cx={cx} cy={cy} r={r} fill="none" stroke="#3b3b40" strokeWidth="2" />
+      <circle cx={cx} cy={cy} r={37 * k} fill="#101012" />
+      <circle cx={cx} cy={cy} r={32 * k} fill="none" stroke="#d6312b" strokeWidth="2.2" />
+      <circle cx={cx} cy={cy} r={26 * k} fill="url(#art-glass)" />
+      <ellipse
+        cx={cx - 9 * k}
+        cy={cy - 10 * k}
+        rx={8 * k}
+        ry={5 * k}
+        fill="#fff"
+        opacity="0.28"
+        filter="url(#art-soft)"
+        transform={`rotate(-30 ${cx - 9 * k} ${cy - 10 * k})`}
+      />
+      <circle cx={cx + 7 * k} cy={cy + 8 * k} r={2.2 * k} fill="#fff" opacity="0.18" />
+    </>
+  );
+}
+
+/** Cámara de acción (Action, Nano): cuerpo ancho, pantalla al frente y soportes. */
+function ActionBody(props: BodyProps) {
+  return (
+    <>
+      <path d="M78 82c-30 0-44 14-44 34s14 34 44 34" fill="none" stroke="#dedede" strokeWidth="14" strokeLinecap="round" />
+      <path d="M242 82c30 0 44 14 44 34s-14 34-44 34" fill="none" stroke="#dedede" strokeWidth="14" strokeLinecap="round" />
+      <rect x="66" y="46" width="188" height="132" rx="24" fill="url(#art-body)" />
+      <rect x="66" y="46" width="188" height="132" rx="24" fill="none" stroke="#5c5c61" strokeOpacity="0.6" />
+      <path d="M90 47h140" stroke="#8a8a90" strokeOpacity="0.5" strokeWidth="1.5" strokeLinecap="round" />
+      <rect x="226" y="40" width="20" height="7" rx="3.5" fill="#3a3a3e" />
+      <rect x="70" y="160" width="180" height="16" rx="8" fill="#141416" opacity="0.7" />
+      <Screen x={87} y={69} w={70} h={82} {...props} />
+      <Lens cx={206} cy={108} r={44} />
+    </>
+  );
+}
+
+/** De mano con estabilizador (Pocket): mango alto, cabezal con la lente y pantalla. */
+function PocketBody(props: BodyProps) {
+  return (
+    <>
+      <rect x="128" y="64" width="64" height="152" rx="24" fill="url(#art-body)" />
+      <rect x="128" y="64" width="64" height="152" rx="24" fill="none" stroke="#5c5c61" strokeOpacity="0.6" />
+      <rect x="146" y="40" width="28" height="34" rx="8" fill="#26262a" />
+      <rect x="114" y="6" width="92" height="58" rx="22" fill="url(#art-body)" />
+      <rect x="114" y="6" width="92" height="58" rx="22" fill="none" stroke="#5c5c61" strokeOpacity="0.6" />
+      <Lens cx={160} cy={35} r={24} />
+      <Screen x={137} y={84} w={46} h={66} {...props} />
+      <circle cx="160" cy="180" r="9" fill="#141416" stroke="#4a4a4f" />
+      <circle cx="160" cy="180" r="3.5" fill="#d6312b" />
+    </>
+  );
+}
+
+/** Cámara 360: cuerpo alto con una lente abombada a cada lado. */
+function PanoBody(props: BodyProps) {
+  return (
+    <>
+      <rect x="112" y="14" width="96" height="200" rx="34" fill="url(#art-body)" />
+      <rect x="112" y="14" width="96" height="200" rx="34" fill="none" stroke="#5c5c61" strokeOpacity="0.6" />
+      <circle cx="160" cy="68" r="40" fill="#1b1b1e" />
+      <Lens cx={160} cy={68} r={36} />
+      <Screen x={134} y={124} w={52} h={56} {...props} />
+      <rect x="146" y="194" width="28" height="6" rx="3" fill="#141416" />
+    </>
   );
 }

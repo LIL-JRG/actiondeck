@@ -1,5 +1,7 @@
 mod camera_wifi;
+pub mod devices;
 mod import;
+mod luts;
 mod media;
 mod render;
 mod tools;
@@ -13,7 +15,7 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use media::{CameraDrive, ClipInfo, MediaFile};
-use render::{Encoder, ExportSettings, RunningExport, TimelineItem};
+use render::{Encoder, ExportSettings, Lenses, RunningExport, TimelineItem};
 use tools::Tools;
 use wireless::watch::Nearby;
 
@@ -22,14 +24,18 @@ use wireless::watch::Nearby;
 struct Settings {
     library_dir: Option<PathBuf>,
     ffmpeg_dir: Option<PathBuf>,
+    /// De antes de las LUT incluidas: la que el usuario había elegido. Al
+    /// abrir se pasa a las extra y se borra de aquí.
+    #[serde(skip_serializing)]
     lut_name: Option<String>,
-    lut_size: Option<u32>,
 }
 
 struct AppState {
     settings: Mutex<Settings>,
     settings_path: PathBuf,
     cache_dir: PathBuf,
+    /// LUT extra del usuario.
+    luts_dir: PathBuf,
     default_library: PathBuf,
     import_cancel: AtomicBool,
     export: RunningExport,
@@ -75,8 +81,6 @@ struct SettingsView {
     library_dir: String,
     ffmpeg_dir: Option<String>,
     ffmpeg_error: Option<String>,
-    lut_name: Option<String>,
-    lut_size: Option<u32>,
     hardware: Option<tools::Hardware>,
     platform: &'static str,
 }
@@ -89,8 +93,6 @@ fn view(state: &AppState) -> SettingsView {
         library_dir: state.library().to_string_lossy().into_owned(),
         ffmpeg_dir: settings.ffmpeg_dir.map(|p| p.to_string_lossy().into_owned()),
         ffmpeg_error: tools.err(),
-        lut_name: settings.lut_name,
-        lut_size: settings.lut_size,
         hardware,
         platform: std::env::consts::OS,
     }
@@ -136,26 +138,44 @@ async fn set_ffmpeg_dir(state: State<'_, AppState>, path: Option<String>) -> Res
     Ok(view(&state))
 }
 
+/// El texto de una LUT, para que la vista previa la aplique en la GPU.
 #[tauri::command]
-async fn set_lut(state: State<'_, AppState>, path: String) -> Result<SettingsView, String> {
-    let source = PathBuf::from(&path);
-    let size = render::install_lut(&source, &state.cache_dir)?;
-    let name = source.file_name().unwrap_or_default().to_string_lossy().into_owned();
-    state.update(|s| {
-        s.lut_name = Some(name);
-        s.lut_size = Some(size);
-    })?;
-    Ok(view(&state))
+async fn lut_file(state: State<'_, AppState>, id: String) -> Result<tauri::ipc::Response, String> {
+    let (dir, cache) = (state.luts_dir.clone(), state.cache_dir.clone());
+    blocking(move || {
+        let file = luts::materialize(&id, &dir, &cache)?;
+        std::fs::read(cache.join(file)).map(tauri::ipc::Response::new).map_err(|e| e.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
-async fn clear_lut(state: State<'_, AppState>) -> Result<SettingsView, String> {
-    let _ = std::fs::remove_file(state.cache_dir.join(render::ACTIVE_LUT));
-    state.update(|s| {
-        s.lut_name = None;
-        s.lut_size = None;
-    })?;
-    Ok(view(&state))
+fn list_luts(state: State<'_, AppState>) -> Vec<luts::LutInfo> {
+    luts::list(&state.luts_dir)
+}
+
+#[tauri::command]
+async fn import_lut(state: State<'_, AppState>, path: String) -> Result<Vec<luts::LutInfo>, String> {
+    let dir = state.luts_dir.clone();
+    blocking(move || luts::import(&dir, Path::new(&path)).map(|_| luts::list(&dir))).await
+}
+
+#[tauri::command]
+fn remove_lut(state: State<'_, AppState>, id: String) -> Result<Vec<luts::LutInfo>, String> {
+    luts::remove(&state.luts_dir, &id)?;
+    Ok(luts::list(&state.luts_dir))
+}
+
+#[tauri::command]
+fn lut_packs(state: State<'_, AppState>) -> Vec<luts::PackInfo> {
+    luts::packs(&state.luts_dir)
+}
+
+/// Descarga un paquete de estilos de DJI; devuelve todas las LUT.
+#[tauri::command]
+async fn download_lut_pack(state: State<'_, AppState>, id: String) -> Result<Vec<luts::LutInfo>, String> {
+    let dir = state.luts_dir.clone();
+    blocking(move || luts::download_pack(&dir, &id).map(|_| luts::list(&dir))).await
 }
 
 #[tauri::command]
@@ -213,8 +233,17 @@ async fn thumbnail(state: State<'_, AppState>, path: String) -> Result<String, S
         let out = cache.join("thumbs").join(format!("{}.jpg", cache_key(&source, "thumb360")));
         if !out.is_file() {
             std::fs::create_dir_all(out.parent().unwrap()).map_err(|e| e.to_string())?;
-            let at = media::probe(&tools, &source).map(|i| (i.duration / 3.0).min(2.0)).unwrap_or(0.0);
-            render::extract_frame(&tools, &cache, &source, at, false, 360, &out)?;
+            let info = media::probe(&tools, &source).ok();
+            let at = info.as_ref().map(|i| (i.duration / 3.0).min(2.0)).unwrap_or(0.0);
+            let view = render::View360::default();
+            match info.filter(|i| i.pano) {
+                // Un 360 se muestra mirando al frente; del `.LRF` es mucho más rápido.
+                Some(_) => match media::lrf_beside(&source) {
+                    Some(lrf) => render::extract_frame(&tools, &cache, &lrf, at, &[], Some((Lenses::SideBySide, &view)), 360, &out)?,
+                    None => render::extract_frame(&tools, &cache, &source, at, &[], Some((Lenses::Tracks, &view)), 360, &out)?,
+                },
+                None => render::extract_frame(&tools, &cache, &source, at, &[], None, 360, &out)?,
+            }
         }
         Ok(out.to_string_lossy().into_owned())
     })
@@ -228,20 +257,33 @@ struct FramePair {
 }
 
 #[tauri::command]
-async fn compare_frames(state: State<'_, AppState>, path: String, at: f64) -> Result<FramePair, String> {
+async fn compare_frames(
+    state: State<'_, AppState>,
+    path: String,
+    at: f64,
+    lut: Option<String>,
+    look: Option<String>,
+    view: Option<render::View360>,
+) -> Result<FramePair, String> {
     let tools = state.tools()?;
     let cache = state.cache_dir.clone();
-    let has_lut = state.settings().lut_name.is_some();
+    let luts_dir = state.luts_dir.clone();
     blocking(move || {
         let source = PathBuf::from(&path);
         let dir = cache.join("frames");
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let key = cache_key(&source, &format!("{at:.2}"));
+        let files = [lut, look]
+            .into_iter()
+            .flatten()
+            .map(|id| luts::materialize(&id, &luts_dir, &cache))
+            .collect::<Result<Vec<_>, _>>()?;
+        let pano = view.as_ref().map(|v| (Lenses::Tracks, v));
+        let key = cache_key(&source, &format!("{at:.2}{view:?}"));
         let before = dir.join(format!("{key}-a.jpg"));
-        render::extract_frame(&tools, &cache, &source, at, false, 720, &before)?;
-        let after = if has_lut {
-            let out = dir.join(format!("{key}-b.jpg"));
-            render::extract_frame(&tools, &cache, &source, at, true, 720, &out)?;
+        render::extract_frame(&tools, &cache, &source, at, &[], pano, 720, &before)?;
+        let after = if !files.is_empty() {
+            let out = dir.join(format!("{}-b.jpg", cache_key(&source, &format!("{at:.2}{view:?}{}", files.join("+")))));
+            render::extract_frame(&tools, &cache, &source, at, &files, pano, 720, &out)?;
             Some(out.to_string_lossy().into_owned())
         } else {
             None
@@ -262,6 +304,19 @@ async fn preview_source(state: State<'_, AppState>, path: String, force_proxy: O
     blocking(move || {
         let source = PathBuf::from(&path);
         let info = media::probe(&tools, &source)?;
+        if info.pano {
+            // Las dos lentes lado a lado: el `.LRF` de la cámara o uno hecho igual.
+            if let Some(lrf) = media::lrf_beside(&source) {
+                return Ok(lrf.to_string_lossy().into_owned());
+            }
+            let out = cache.join("proxies").join(format!("{}.mp4", cache_key(&source, "pano")));
+            if !out.is_file() {
+                std::fs::create_dir_all(out.parent().unwrap()).map_err(|e| e.to_string())?;
+                let encoder = if hardware.h264 { hardware.encoder } else { Encoder::Cpu };
+                render::make_pano_proxy(&tools, &source, encoder, &out)?;
+            }
+            return Ok(out.to_string_lossy().into_owned());
+        }
         if info.browser_playable && !force_proxy.unwrap_or(false) {
             return Ok(path);
         }
@@ -280,7 +335,7 @@ async fn preview_source(state: State<'_, AppState>, path: String, force_proxy: O
 async fn start_export(
     app: AppHandle,
     state: State<'_, AppState>,
-    items: Vec<TimelineItem>,
+    mut items: Vec<TimelineItem>,
     settings: ExportSettings,
 ) -> Result<String, String> {
     if state.export.0.lock().unwrap().is_some() {
@@ -288,8 +343,17 @@ async fn start_export(
     }
     let tools = state.tools()?;
     let cache = state.cache_dir.clone();
+    let luts_dir = state.luts_dir.clone();
     let handle = app.clone();
     blocking(move || {
+        // La interfaz manda IDs de LUT; ffmpeg necesita sus archivos en la caché.
+        for item in &mut items {
+            for slot in [&mut item.lut, &mut item.look] {
+                if let Some(id) = slot.take() {
+                    *slot = Some(luts::materialize(&id, &luts_dir, &cache)?);
+                }
+            }
+        }
         let state = handle.state::<AppState>();
         render::run_export(&tools, &cache, &items, &settings, &state.export, |progress| {
             let _ = handle.emit("export-progress", progress);
@@ -326,6 +390,21 @@ fn cancel_export(state: State<'_, AppState>) -> bool {
     render::cancel_export(&state.export)
 }
 
+/// La LUT que se había elegido antes (copiada a `active.cube` en la caché)
+/// pasa a las extra con su nombre, y los ajustes ya no la mencionan.
+fn migrate_old_lut(state: &AppState, name: &str) {
+    let old = state.cache_dir.join("active.cube");
+    let stem = Path::new(name).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    if old.is_file() && !stem.is_empty() {
+        let named = state.cache_dir.join(format!("{stem}.cube"));
+        if std::fs::rename(&old, &named).is_ok() {
+            let _ = luts::import(&state.luts_dir, &named);
+            let _ = std::fs::remove_file(&named);
+        }
+    }
+    let _ = state.update(|_| {});
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -339,15 +418,17 @@ pub fn run() {
         .setup(|app| {
             let paths = app.path();
             let settings_path = paths.app_config_dir()?.join("settings.json");
+            let luts_dir = paths.app_config_dir()?.join("luts");
             let cache_dir = paths.app_cache_dir()?;
             let default_library = paths
                 .video_dir()
                 .unwrap_or_else(|_| paths.home_dir().unwrap_or_default())
                 .join("ActionDeck");
-            let settings: Settings = std::fs::read_to_string(&settings_path)
+            let mut settings: Settings = std::fs::read_to_string(&settings_path)
                 .ok()
                 .and_then(|t| serde_json::from_str(&t).ok())
                 .unwrap_or_default();
+            let migrate_lut = settings.lut_name.take();
 
             std::fs::create_dir_all(&cache_dir)?;
             allow_dir(app.handle(), &cache_dir);
@@ -363,7 +444,11 @@ pub fn run() {
                 hardware: Mutex::new(None),
                 nearby: Mutex::new(Nearby::default()),
                 camera_wifi: camera_wifi::CameraWifi::default(),
+                luts_dir,
             });
+            if let Some(name) = migrate_lut {
+                migrate_old_lut(&app.state::<AppState>(), &name);
+            }
 
             // Como Mimo: detecta la cámara en cuanto se enciende.
             let handle = app.handle().clone();
@@ -377,8 +462,12 @@ pub fn run() {
             get_settings,
             set_library_dir,
             set_ffmpeg_dir,
-            set_lut,
-            clear_lut,
+            list_luts,
+            lut_file,
+            import_lut,
+            remove_lut,
+            lut_packs,
+            download_lut_pack,
             list_camera_drives,
             scan_folder,
             library_files,

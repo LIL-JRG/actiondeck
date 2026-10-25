@@ -271,3 +271,11 @@ export const ExternalIcon = (p: IconProps) => (
     <path d="M14 4.5h5.5V10M19.5 4.5 11 13M17 14v4.5a1 1 0 0 1-1 1H5.5a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1H10" />
   </Icon>
 );
+
+export const SphereIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <circle cx="12" cy="12" r="8.5" />
+    <ellipse cx="12" cy="12" rx="8.5" ry="3.4" />
+    <path d="M12 3.5c2.4 2.3 3.5 5.1 3.5 8.5s-1.1 6.2-3.5 8.5c-2.4-2.3-3.5-5.1-3.5-8.5s1.1-6.2 3.5-8.5z" />
+  </Icon>
+);

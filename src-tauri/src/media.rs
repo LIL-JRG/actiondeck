@@ -5,9 +5,11 @@ use serde::Serialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+use crate::devices::{self, ColorMode};
 use crate::tools::Tools;
 
-const VIDEO_EXT: &[&str] = &["mp4", "mov"];
+/// `osv`: video 360 de la Osmo 360 (un MP4 con una pista por lente).
+const VIDEO_EXT: &[&str] = &["mp4", "mov", "osv"];
 const PHOTO_EXT: &[&str] = &["jpg", "jpeg", "dng"];
 /// Las cámaras DJI pueden grabar una copia de baja resolución (`.LRF`) al lado
 /// de cada video. No se importa por defecto, pero sirve como vista previa.
@@ -54,6 +56,15 @@ pub struct ClipInfo {
     pub creation_time: Option<String>,
     /// Si WebView2 puede reproducir el archivo directamente (H.264 de 8 bits).
     pub browser_playable: bool,
+    /// Cámara que lo grabó, según la etiqueta `encoder` (`DJI OsmoAction5 Pro`).
+    pub device: Option<String>,
+    /// Perfil de color, de los metadatos `djmd` de DJI.
+    pub color_mode: Option<ColorMode>,
+    /// LUT oficial que lo lleva a Rec.709, si se grabó en un perfil logarítmico.
+    pub suggested_lut: Option<String>,
+    /// Video 360: una pista cuadrada por lente. Entonces `width`×`height` es
+    /// la vista 16:9 que se saca de él, no el tamaño de las pistas.
+    pub pano: bool,
 }
 
 pub fn probe(tools: &Tools, path: &Path) -> Result<ClipInfo, String> {
@@ -72,7 +83,98 @@ pub fn probe(tools: &Tools, path: &Path) -> Result<ClipInfo, String> {
     }
     let json: Value = serde_json::from_slice(&out.stdout)
         .map_err(|e| format!("Respuesta de ffprobe inválida: {e}"))?;
-    parse_probe(&json)
+    let mut info = parse_probe(&json)?;
+    if let Some(index) = djmd_stream(&json) {
+        info.color_mode = read_djmd(tools, path, index).as_deref().and_then(color_mode_from_djmd).map(ColorMode::from_dvtm);
+    }
+    let device = info.device.as_deref().and_then(devices::by_name);
+    info.suggested_lut = info.color_mode.and_then(|mode| devices::suggested_lut(device, mode)).map(str::to_string);
+    Ok(info)
+}
+
+/// La versión ligera `.LRF` que la cámara graba junto a un video, si está.
+pub fn lrf_beside(path: &Path) -> Option<PathBuf> {
+    ["LRF", "lrf"].into_iter().map(|ext| path.with_extension(ext)).find(|p| p.is_file())
+}
+
+/// Índice de la pista de metadatos de DJI (`djmd`), si el archivo la tiene.
+fn djmd_stream(json: &Value) -> Option<u64> {
+    json["streams"].as_array()?.iter().find(|s| s["codec_tag_string"] == "djmd")?["index"].as_u64()
+}
+
+/// El primer paquete de la pista `djmd`: describe el clip completo.
+fn read_djmd(tools: &Tools, path: &Path, index: u64) -> Option<Vec<u8>> {
+    let out = tools
+        .ffmpeg()
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args(["-map", &format!("0:{index}"), "-c", "copy", "-frames:d", "1", "-f", "data", "-"])
+        .output()
+        .ok()?;
+    (out.status.success() && !out.stdout.is_empty()).then_some(out.stdout)
+}
+
+enum Field<'a> {
+    Varint(u64),
+    Bytes(&'a [u8]),
+    Other,
+}
+
+fn varint(buf: &[u8], pos: &mut usize) -> Option<u64> {
+    let mut value = 0u64;
+    for shift in (0..64).step_by(7) {
+        let byte = *buf.get(*pos)?;
+        *pos += 1;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// Primer campo `number` de un mensaje protobuf, sin necesitar su esquema.
+fn field(message: &[u8], number: u64) -> Option<Field<'_>> {
+    let mut pos = 0;
+    while pos < message.len() {
+        let key = varint(message, &mut pos)?;
+        let value = match key & 7 {
+            0 => Field::Varint(varint(message, &mut pos)?),
+            1 => {
+                pos += 8;
+                Field::Other
+            }
+            2 => {
+                let len = varint(message, &mut pos)? as usize;
+                let bytes = message.get(pos..pos.checked_add(len)?)?;
+                pos += len;
+                Field::Bytes(bytes)
+            }
+            5 => {
+                pos += 4;
+                Field::Other
+            }
+            _ => return None,
+        };
+        if key >> 3 == number {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// `ProductMeta.stream_meta(2).color_mode(4).color_mode(1)`, como en
+/// `dvtm_oq101.proto` de telemetry-parser; la Action 5 Pro (`dvtm_ac204`)
+/// usa la misma estructura.
+pub fn color_mode_from_djmd(packet: &[u8]) -> Option<u64> {
+    let Field::Bytes(stream_meta) = field(packet, 2)? else { return None };
+    let Field::Bytes(color_mode) = field(stream_meta, 4)? else { return None };
+    match field(color_mode, 1) {
+        Some(Field::Varint(mode)) => Some(mode),
+        // proto3 omite el valor por defecto (0, normal).
+        None => Some(0),
+        _ => None,
+    }
 }
 
 pub fn parse_probe(json: &Value) -> Result<ClipInfo, String> {
@@ -82,6 +184,18 @@ pub fn parse_probe(json: &Value) -> Result<ClipInfo, String> {
         .find(|s| s["codec_type"] == "video" && s["disposition"]["attached_pic"] != 1)
         .ok_or("El archivo no tiene pista de video")?;
     let has_audio = streams.iter().any(|s| s["codec_type"] == "audio");
+    // Las lentes de un 360 son pistas HEVC cuadradas (3840², o 1920² a 100 fps).
+    let lenses = streams
+        .iter()
+        .filter(|s| {
+            s["codec_type"] == "video"
+                && s["disposition"]["attached_pic"] != 1
+                && s["codec_name"] == "hevc"
+                && s["width"] == s["height"]
+                && s["width"].as_u64().unwrap_or(0) >= 1500
+        })
+        .count();
+    let pano = lenses >= 2;
 
     let str_field = |v: &Value, key: &str| v[key].as_str().map(str::to_string);
     let pix_fmt = str_field(video, "pix_fmt").unwrap_or_default();
@@ -95,6 +209,9 @@ pub fn parse_probe(json: &Value) -> Result<ClipInfo, String> {
     let mut height = video["height"].as_u64().unwrap_or(0) as u32;
     if rotation(video).rem_euclid(180) == 90 {
         std::mem::swap(&mut width, &mut height);
+    }
+    if pano {
+        height = (width * 9 / 16) & !1;
     }
 
     let duration = json["format"]["duration"]
@@ -119,7 +236,7 @@ pub fn parse_probe(json: &Value) -> Result<ClipInfo, String> {
         width,
         height,
         fps,
-        browser_playable: browser_playable(&codec, bit_depth),
+        browser_playable: !pano && browser_playable(&codec, bit_depth),
         codec,
         pix_fmt,
         bit_depth,
@@ -127,6 +244,10 @@ pub fn parse_probe(json: &Value) -> Result<ClipInfo, String> {
         color_primaries: str_field(video, "color_primaries"),
         has_audio,
         creation_time,
+        device: json["format"]["tags"]["encoder"].as_str().and_then(devices::by_name).map(|d| d.name.to_string()),
+        color_mode: None,
+        suggested_lut: None,
+        pano,
     })
 }
 
@@ -340,6 +461,44 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Primer paquete `djmd` de un clip real de la Action 5 Pro grabado en D-Log M.
+    const ACTION_5_PRO_DJMD: &str = "0a710a5a0a106476746d5f61633230342e70726f746f120830322e30312e30311a05322e302e312a0e38324a584e434730304532395153320b31302e30302e31362e313348d8c1b20c5213444a49204f736d6f416374696f6e352050726f1204080110014a02080172040a021c0a7a0082010012260a071a05766964656f1a1308801e10c0161d9cc2ef422001280a30044001220208132a020802";
+
+    fn from_hex(hex: &str) -> Vec<u8> {
+        (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect()
+    }
+
+    #[test]
+    fn reads_the_color_profile_from_dji_metadata() {
+        let packet = from_hex(ACTION_5_PRO_DJMD);
+        assert_eq!(color_mode_from_djmd(&packet), Some(19));
+        assert_eq!(ColorMode::from_dvtm(19), ColorMode::DLogM);
+        assert_eq!(color_mode_from_djmd(&packet[..40]), None, "cortado no debe fallar");
+        assert_eq!(color_mode_from_djmd(&[]), None);
+    }
+
+    #[test]
+    fn two_square_lens_tracks_are_a_360_video() {
+        let lens = json!({ "codec_type": "video", "codec_name": "hevc", "width": 3840, "height": 3840, "pix_fmt": "yuv420p10le", "avg_frame_rate": "25/1" });
+        let probe = json!({
+            "streams": [lens, lens, { "codec_type": "audio" }, { "codec_type": "video", "codec_name": "mjpeg", "width": 344, "height": 612, "disposition": { "attached_pic": 0 } }],
+            "format": { "duration": "23.4", "tags": { "encoder": "Osmo 360" } }
+        });
+        let info = parse_probe(&probe).unwrap();
+        assert!(info.pano && !info.browser_playable);
+        assert_eq!((info.width, info.height), (3840, 2160));
+        assert_eq!(info.device.as_deref(), Some("Osmo 360"));
+    }
+
+    #[test]
+    fn recognizes_the_camera_from_the_encoder_tag() {
+        let probe = json!({
+            "streams": [{ "codec_type": "video", "codec_name": "hevc", "width": 3840, "height": 2160, "pix_fmt": "yuv420p10le" }],
+            "format": { "duration": "16.4", "tags": { "encoder": "DJI OsmoAction5 Pro" } }
+        });
+        assert_eq!(parse_probe(&probe).unwrap().device.as_deref(), Some("Osmo Action 5 Pro"));
+    }
+
     #[test]
     fn parses_10bit_hevc_with_rotation() {
         let probe = json!({
@@ -387,3 +546,4 @@ mod tests {
         assert!(video.proxy_path.as_deref().unwrap().ends_with("DJI_20261020_0001_D.LRF"));
     }
 }
+
