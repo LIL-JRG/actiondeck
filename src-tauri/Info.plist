@@ -4,5 +4,7 @@
 <dict>
   <key>NSBluetoothAlwaysUsageDescription</key>
   <string>ActionDeck usa Bluetooth para detectar tu cámara DJI cuando la enciendes.</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>ActionDeck se conecta al Wi-Fi de tu cámara DJI para importar los videos.</string>
 </dict>
 </plist>
