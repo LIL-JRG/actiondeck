@@ -32,6 +32,19 @@ Las tablas de modelos están en `src-tauri/src/devices.rs`; las LUT, en `src-tau
 
 Fase siguiente: DJI Mic Mini 2 (fase 3).
 
+## Instalar en Mac
+
+Descarga el `.dmg` de [Releases](https://github.com/LIL-JRG/actiondeck/releases), ábrelo y arrastra ActionDeck a Aplicaciones. Es para Mac con Apple Silicon (M1 o posterior), macOS 12+, y ya trae ffmpeg dentro.
+
+La app no está firmada con un certificado de Apple, así que la primera vez macOS no la deja abrir:
+
+1. Abre ActionDeck desde Aplicaciones y cierra el aviso.
+2. Ve a Ajustes del Sistema › Privacidad y seguridad, baja hasta «Se bloqueó ActionDeck» y pulsa **Abrir de todos modos**.
+
+También funciona `xattr -dr com.apple.quarantine /Applications/ActionDeck.app` en la Terminal.
+
+Para generar el `.dmg`: `npm run release:mac`. Descarga ffmpeg estático (verificado con SHA-256) a `src-tauri/binaries/` y deja el instalador en `src-tauri/target/release/bundle/dmg/`. Ese ffmpeg es una compilación GPL de [Martin Riedl](https://ffmpeg.martin-riedl.de).
+
 ## Requisitos
 
 - **Windows 10/11** con WebView2. ffmpeg y ffprobe: `winget install Gyan.FFmpeg`. Exporta rápido con GPU NVIDIA (NVENC) si hay una.
