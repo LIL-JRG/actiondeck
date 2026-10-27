@@ -6,7 +6,7 @@ Fase 1 (esta versión):
 
 - **Importar**: detecta la cámara conectada por USB o su microSD (cualquier unidad con `DCIM`) y copia los videos y fotos a la biblioteca, en carpetas por fecha. No duplica lo ya importado y una copia interrumpida nunca queda como archivo completo.
 - **Recuperar color**: las LUT oficiales de DJI para convertir D-Log M, D-Log y D-Log2 a Rec.709 vienen dentro de la app. Cada clip usa la de su cámara: la app lee el modelo y el perfil de color de los metadatos de DJI y solo convierte los clips grabados en un perfil logarítmico.
-- **Filtros**: los estilos creativos de DJI (Action 4, Action 5 Pro, Pocket 3) se descargan con un clic desde Ajustes, y se puede importar cualquier LUT `.cube`.
+- **Filtros**: una galería de 22 estilos incluidos, ordenados por uso (Cine, Vívido, Motos, Senderismo, Película y B/N), cada uno con su intensidad, y miniaturas del cuadro actual con cada estilo. Los estilos se generan con recetas de colorista y pasan pruebas de neutralidad, piel, suavidad y gamut (ver `src-tauri/resources/looks/README.md`). Además, los estilos creativos de DJI (Action 4, Action 5 Pro, Pocket 3) se descargan con un clic desde Ajustes, y se puede importar cualquier LUT `.cube`.
 - **Vista previa en vivo**: el color recuperado y el filtro se ven mientras se reproduce (WebGL2 con LUT 3D en la GPU), en el editor, en el álbum y en la tira de cuadros.
 - **Videos 360 (Osmo 360)**: los `.OSV` se ven arrastrando para mirar alrededor, en vista normal o "pequeño planeta"; en el editor cada clip guarda su vista y se exporta en cualquier formato (también vertical) con el `v360` de ffmpeg. La vista previa usa el `.LRF` de la cámara (las dos lentes lado a lado) y se importa junto con el `.OSV`.
 - **Editar**: recortar clips, compararlos antes y después de la LUT, ordenarlos en una línea de tiempo y unirlos.
@@ -28,7 +28,7 @@ Fase 2:
 | Osmo 360 | sí, incluidos los 360 `.OSV` | no levanta su red Wi-Fi | D-Log M |
 | Osmo Action, Action 2 | sí | no | — |
 
-Las tablas de modelos están en `src-tauri/src/devices.rs`; las LUT, en `src-tauri/resources/luts/`.
+Las tablas de modelos están en `src-tauri/src/devices.rs`; las LUT oficiales, en `src-tauri/resources/luts/`, y la galería de estilos, en `src-tauri/resources/looks/` (se regenera con `python3 scripts/looks/generate.py --check`, requiere numpy).
 
 Fase siguiente: DJI Mic Mini 2 (fase 3).
 
@@ -68,7 +68,8 @@ npm run tauri build                     # instalador NSIS en src-tauri\target\re
 - `src-tauri/src/import.rs`: copia con progreso a la biblioteca.
 - `src-tauri/src/render.rs`: exportación, cuadros de comparación y vistas previas ligeras.
 - `src-tauri/src/devices.rs`: modelos de cámara (Bluetooth, metadatos, Wi-Fi, LUT oficial).
-- `src-tauri/src/luts.rs`: LUT incluidas, extra del usuario y paquetes de estilos de DJI.
+- `src-tauri/src/luts.rs`: LUT incluidas (conversión y galería), intensidad, extra del usuario y paquetes de estilos de DJI.
+- `scripts/looks/generate.py`: recetas y pruebas de la galería de estilos.
 - `src-tauri/src/lib.rs`: estado, ajustes y comandos que usa la interfaz.
 - `src/`: interfaz en React (Importar, Editar y exportar, Ajustes).
 

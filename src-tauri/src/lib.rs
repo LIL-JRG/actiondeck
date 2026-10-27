@@ -263,6 +263,7 @@ async fn compare_frames(
     at: f64,
     lut: Option<String>,
     look: Option<String>,
+    look_strength: Option<f64>,
     view: Option<render::View360>,
 ) -> Result<FramePair, String> {
     let tools = state.tools()?;
@@ -272,10 +273,10 @@ async fn compare_frames(
         let source = PathBuf::from(&path);
         let dir = cache.join("frames");
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let files = [lut, look]
+        let files = [lut.map(|id| (id, 1.0)), look.map(|id| (id, look_strength.unwrap_or(1.0)))]
             .into_iter()
             .flatten()
-            .map(|id| luts::materialize(&id, &luts_dir, &cache))
+            .map(|(id, amount)| luts::materialize_mix(&id, amount, &luts_dir, &cache))
             .collect::<Result<Vec<_>, _>>()?;
         let pano = view.as_ref().map(|v| (Lenses::Tracks, v));
         let key = cache_key(&source, &format!("{at:.2}{view:?}"));
@@ -348,10 +349,11 @@ async fn start_export(
     blocking(move || {
         // La interfaz manda IDs de LUT; ffmpeg necesita sus archivos en la caché.
         for item in &mut items {
-            for slot in [&mut item.lut, &mut item.look] {
-                if let Some(id) = slot.take() {
-                    *slot = Some(luts::materialize(&id, &luts_dir, &cache)?);
-                }
+            if let Some(id) = item.lut.take() {
+                item.lut = Some(luts::materialize(&id, &luts_dir, &cache)?);
+            }
+            if let Some(id) = item.look.take() {
+                item.look = Some(luts::materialize_mix(&id, item.look_strength, &luts_dir, &cache)?);
             }
         }
         let state = handle.state::<AppState>();

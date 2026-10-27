@@ -4,7 +4,7 @@ import { formatClock } from "./format";
 import { loadLut, VideoRenderer, type View360 } from "./gl";
 
 /** Cómo se ve cada cuadro: con su LUT, su filtro y, si es 360, su vista. */
-export type FrameLook = { lut: string | null; look: string | null; view: View360 | null };
+export type FrameLook = { lut: string | null; look: string | null; lookAmount?: number; view: View360 | null };
 
 /** Lo que se conserva de un clip, con sus bordes arrastrables en la tira. */
 export type TrimRange = { inPoint: number; outPoint: number; onChange: (inPoint: number, outPoint: number) => void };
@@ -199,6 +199,7 @@ function Frames({
           gl.height = height * dpr;
           renderer = new VideoRenderer(gl);
           renderer.view = look.view;
+          renderer.lookAmount = look.lookAmount ?? 1;
           renderer.fit = "cover";
           const [lut, lookLut] = await Promise.all([look.lut ? loadLut(look.lut) : null, look.look ? loadLut(look.look) : null]);
           renderer.setLut(0, lut);

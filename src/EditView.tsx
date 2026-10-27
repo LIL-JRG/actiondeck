@@ -23,27 +23,33 @@ import {
   type View360,
 } from "./api";
 import { Filmstrip } from "./Filmstrip";
-import { clampFov, DEFAULT_VIEW, PLANET_VIEW } from "./gl";
+import { clampFov, DEFAULT_VIEW, loadLut, PLANET_VIEW, VideoRenderer } from "./gl";
 import { GLVideo } from "./GLVideo";
+import { LookGallery } from "./LookGallery";
 import { describeClip, formatDuration, formatTime } from "./format";
 import {
   AspectIcon,
   CheckIcon,
+  ChevronDownIcon,
   CloseIcon,
   CompareIcon,
   DownloadIcon,
+  FeedIcon,
   LogIcon,
   MuteIcon,
   PaletteIcon,
   PauseIcon,
+  PhoneIcon,
   PlayIcon,
   PlusIcon,
   ScissorsIcon,
+  SparkIcon,
   SpeedIcon,
   SphereIcon,
   SplitIcon,
   TrashIcon,
   VolumeIcon,
+  WideIcon,
 } from "./icons";
 import type { LocalMeta } from "./library";
 import { Sheet } from "./Sheet";
@@ -92,11 +98,6 @@ function formatSpeed(speed: number): string {
   return `${speed}×`;
 }
 
-/** "DJI OSMO Action 5 Pro Mei" → "Mei": el nombre del estilo sin la cámara. */
-export function shortLutName(name: string): string {
-  return name.replace(/^DJI OSMO (Action \d+( Pro)?|Pocket \d+( Pro)?|Nano|360) /i, "");
-}
-
 /**
  * Un clip completo de la biblioteca, con los ajustes por defecto. Si se grabó
  * en un perfil logarítmico, ya trae la LUT oficial de su cámara.
@@ -110,6 +111,7 @@ export function newItem(file: MediaFile, info: ClipInfo): TimelineItem {
     outPoint: info.duration,
     lut: info.suggestedLut,
     look: null,
+    lookStrength: 1,
     hasAudio: info.hasAudio,
     speed: 1,
     volume: 1,
@@ -272,6 +274,7 @@ export function EditView({ active, settings, luts, library, meta, timeline, setT
             current={current}
             canSplit={canSplit}
             luts={luts}
+            videoRef={videoRef}
             format={format}
             setFormat={setFormat}
             fit={fit}
@@ -311,6 +314,8 @@ export function EditView({ active, settings, luts, library, meta, timeline, setT
         onClose={() => setExportOpen(false)}
         settings={settings}
         timeline={timeline}
+        current={selected}
+        videoRef={videoRef}
         format={format}
         setFormat={setFormat}
         fit={fit}
@@ -470,6 +475,7 @@ function ClipStage({
               videoRef={videoRef}
               lut={item.lut}
               look={item.look}
+              lookAmount={item.lookStrength}
               view={view}
               onView={pano ? onView : undefined}
               videoProps={{
@@ -517,7 +523,7 @@ function ClipStage({
           videoRef={videoRef}
           src={preview ? fileUrl(preview) : null}
           duration={item.info.duration}
-          look={{ lut: item.lut, look: item.look, view }}
+          look={{ lut: item.lut, look: item.look, lookAmount: item.lookStrength, view }}
           trim={{
             inPoint: item.inPoint,
             outPoint: item.outPoint,
@@ -622,6 +628,7 @@ function EditorBar({
   current,
   canSplit,
   luts,
+  videoRef,
   format,
   setFormat,
   fit,
@@ -639,6 +646,7 @@ function EditorBar({
   current: number;
   canSplit: boolean;
   luts: Lut[];
+  videoRef: RefObject<HTMLVideoElement | null>;
   format: FrameFormat;
   setFormat: (f: FrameFormat) => void;
   fit: Fit;
@@ -656,7 +664,7 @@ function EditorBar({
   const runCompare = async () => {
     setComparing(true);
     try {
-      const pair = await api.compareFrames(item.path, current, item.lut, item.look, item.view);
+      const pair = await api.compareFrames(item.path, current, item.lut, item.look, item.lookStrength, item.view);
       setCompare({ ...pair, stamp: Date.now() });
     } catch (e) {
       onError(errorText(e));
@@ -665,8 +673,7 @@ function EditorBar({
     }
   };
 
-  const official = luts.filter((l) => l.builtin);
-  const extras = luts.filter((l) => !l.builtin);
+  const official = luts.filter((l) => l.kind === "conversion");
   const length = item.outPoint - item.inPoint;
   const slowMotionNote =
     item.speed < 1
@@ -828,33 +835,28 @@ function EditorBar({
 
             {tool === "filter" && (
               <div className="tool-body column">
-                {extras.length === 0 ? (
-                  <>
-                    <p className="hint">
-                      Los filtros son LUT extra: descarga los estilos de DJI o importa tus propios .cube en Ajustes.
-                    </p>
-                    <button className="chip" onClick={onGoSettings}>
-                      Conseguir filtros
+                <LookGallery
+                  luts={luts}
+                  value={item.look}
+                  strength={item.lookStrength}
+                  onChange={(look) => update({ look })}
+                  onStrength={(lookStrength) => update({ lookStrength })}
+                  videoRef={videoRef}
+                  frameKey={item.path}
+                  conversion={item.lut}
+                  view={item.view}
+                  onMore={onGoSettings}
+                  action={
+                    <button
+                      className="chip small"
+                      onClick={runCompare}
+                      disabled={comparing || (item.lut === null && item.look === null)}
+                      title={`Antes y después en ${formatTime(current)}, como queda al exportar`}
+                    >
+                      <CompareIcon size={16} /> {comparing ? "Generando…" : "Antes y después"}
                     </button>
-                  </>
-                ) : (
-                  <>
-                    <ChipGroup
-                      options={[{ id: "", label: "Ninguno" }, ...extras.map((l) => ({ id: l.id, label: shortLutName(l.name) }))]}
-                      value={item.look ?? ""}
-                      onChange={(id) => update({ look: id || null })}
-                      layoutId="look-chip"
-                    />
-                    <div className="row">
-                      <button className="chip" onClick={runCompare} disabled={comparing || (item.lut === null && item.look === null)}>
-                        <CompareIcon size={18} /> {comparing ? "Generando…" : `Antes y después en ${formatTime(current)}`}
-                      </button>
-                      <button className="link" onClick={onGoSettings}>
-                        Más filtros
-                      </button>
-                    </div>
-                  </>
-                )}
+                  }
+                />
               </div>
             )}
 
@@ -1186,11 +1188,87 @@ function outputSize(first: ClipInfo, ratio: number, fit: Fit, size: string): { w
   return ratio >= 1 ? { w: even(short * ratio), h: even(short) } : { w: even(short), h: even(short / ratio) };
 }
 
+type Quality = "standard" | "high" | "max";
+
+/** Calidad en palabras; por dentro, el CRF (menor = mejor). */
+const QUALITIES: { id: Quality; label: string; crf: number; note: string }[] = [
+  { id: "standard", label: "Estándar", crf: 23, note: "Archivo liviano, bien para compartir rápido." },
+  { id: "high", label: "Alta", crf: 20, note: "Lo recomendado: casi no se distingue del original." },
+  { id: "max", label: "Máxima", crf: 16, note: "Para guardar o seguir editando; pesa más." },
+];
+
+type Destination = {
+  id: string;
+  label: string;
+  note: string;
+  icon: typeof PhoneIcon;
+  format: FrameFormat;
+  size: string;
+  codec: Codec;
+  quality: Quality;
+  /** Hasta cuántos cuadros por segundo (null = los del clip). */
+  maxFps: number | null;
+};
+
+/** Para dónde es el video: cada uno deja todo listo de una vez. */
+const DESTINATIONS: Destination[] = [
+  { id: "vertical", label: "Redes verticales", note: "TikTok, Reels y Shorts", icon: PhoneIcon, format: "9:16", size: "1080", codec: "h264", quality: "high", maxFps: 60 },
+  { id: "youtube", label: "YouTube", note: "Horizontal, a la mayor resolución", icon: WideIcon, format: "16:9", size: "max", codec: "hevc", quality: "high", maxFps: 60 },
+  { id: "feed", label: "Publicación", note: "Instagram y Facebook, 4:5", icon: FeedIcon, format: "4:5", size: "1080", codec: "h264", quality: "high", maxFps: 60 },
+  { id: "archive", label: "Máxima calidad", note: "Formato original, para guardar", icon: SparkIcon, format: "source", size: "max", codec: "hevc", quality: "max", maxFps: null },
+];
+
+/** Bits por píxel aproximados de cada calidad en H.265; H.264 pesa ~1,6 veces más. */
+const BITS_PER_PIXEL: Record<Quality, number> = { standard: 0.05, high: 0.08, max: 0.14 };
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1).replace(".", ",")} GB`;
+  return `${Math.max(1, Math.round(bytes / 1e6))} MB`;
+}
+
+function formatRemaining(seconds: number): string {
+  if (seconds < 60) return `${Math.max(1, Math.round(seconds))} s`;
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  return s ? `${m} min ${s} s` : `${m} min`;
+}
+
+/** El cuadro actual tal como se verá: con su LUT, su filtro y, si es 360, su vista. */
+async function snapshot(video: HTMLVideoElement, item: TimelineItem, outRatio: number): Promise<string | null> {
+  if (video.readyState < 2 || !video.videoWidth) return null;
+  const pano = item.info.pano;
+  const ratio = pano ? outRatio : video.videoWidth / video.videoHeight;
+  const canvas = document.createElement("canvas");
+  canvas.width = ratio >= 1 ? 640 : Math.round(640 * ratio);
+  canvas.height = Math.round(canvas.width / ratio);
+  if (VideoRenderer.supported() && (item.lut || item.look || pano)) {
+    let r: VideoRenderer | null = null;
+    try {
+      r = new VideoRenderer(canvas);
+      r.view = pano ? (item.view ?? DEFAULT_VIEW) : null;
+      r.lookAmount = item.lookStrength;
+      const [lut, look] = await Promise.all([item.lut ? loadLut(item.lut) : null, item.look ? loadLut(item.look) : null]);
+      r.setLut(0, lut);
+      r.setLut(1, look);
+      if (!r.draw(video)) return null;
+      return canvas.toDataURL("image/jpeg", 0.85);
+    } catch {
+      return null;
+    } finally {
+      r?.dispose(true);
+    }
+  }
+  canvas.getContext("2d")?.drawImage(video, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/jpeg", 0.85);
+}
+
 function ExportSheet({
   open,
   onClose,
   settings,
   timeline,
+  current,
+  videoRef,
   format,
   setFormat,
   fit,
@@ -1201,6 +1279,9 @@ function ExportSheet({
   onClose: () => void;
   settings: Settings;
   timeline: TimelineItem[];
+  /** El clip que se está viendo: de él sale la vista previa. */
+  current: TimelineItem | null;
+  videoRef: RefObject<HTMLVideoElement | null>;
   format: FrameFormat;
   setFormat: (f: FrameFormat) => void;
   fit: Fit;
@@ -1208,12 +1289,14 @@ function ExportSheet({
   onError: (m: string) => void;
 }) {
   const first = timeline[0]?.info;
-  const [codec, setCodec] = useState<Codec>("hevc");
   const hardware = settings.hardware;
+  const [codec, setCodec] = useState<Codec>("hevc");
   const [encoder, setEncoder] = useState<Encoder>(hardware?.hevc ? hardware.encoder : "cpu");
-  const [quality, setQuality] = useState(20);
+  const [quality, setQuality] = useState<Quality>("high");
   const [size, setSize] = useState("max");
   const [fps, setFps] = useState("source");
+  const [advanced, setAdvanced] = useState(false);
+  const [preview, setPreview] = useState<string | null>(null);
   const [progress, setProgress] = useState<ExportProgress | null>(null);
   const [exporting, setExporting] = useState(false);
   const [result, setResult] = useState<string | null>(null);
@@ -1228,22 +1311,60 @@ function ExportSheet({
   const hardwareOk = !!hardware && (codec === "h264" ? hardware.h264 : hardware.hevc);
   useEffect(() => {
     if (encoder !== "cpu" && !hardwareOk) setEncoder("cpu");
-  }, [encoder, hardwareOk]);
+    else if (encoder === "cpu" && hardwareOk && hardware) setEncoder(hardware.encoder);
+    // Solo al cambiar de archivo: si elige el procesador a mano, se respeta.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [codec, hardwareOk]);
 
-  // Para redes sociales, 1080 es lo habitual; en el formato original, lo máximo.
-  const lastFormat = useRef(format);
+  const sourceFps = first ? Math.round(first.fps * 1000) / 1000 : 30;
+  const presetFps = (d: Destination) => (d.maxFps !== null && sourceFps > d.maxFps + 0.5 ? String(d.maxFps) : "source");
+  const applyDestination = (d: Destination) => {
+    setFormat(d.format);
+    setSize(d.size);
+    setCodec(d.codec);
+    setQuality(d.quality);
+    setFps(presetFps(d));
+  };
+  const destination = DESTINATIONS.find(
+    (d) => d.format === format && d.size === size && d.codec === codec && d.quality === quality && presetFps(d) === fps,
+  );
+
+  // Al abrir, el destino que corresponde al formato elegido en el editor.
   useEffect(() => {
-    if (lastFormat.current !== format) setSize(format === "source" ? "max" : "1080");
-    lastFormat.current = format;
-  }, [format]);
+    if (!open || exporting) return;
+    setResult(null);
+    const match = DESTINATIONS.find((d) => d.format === format);
+    if (match) applyDestination(match);
+    else {
+      setSize("1080");
+      setCodec("h264");
+      setQuality("high");
+      setFps(sourceFps > 60.5 ? "60" : "source");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   const ratio = FORMATS.find((f) => f.id === format)?.ratio ?? (first ? clipRatio(first) : null);
   const reframes = !!first && ratio !== null && Math.abs(ratio - clipRatio(first)) > 0.01;
   const effectiveFit = reframes ? fit : "crop";
   const out = first && ratio ? outputSize(first, ratio, effectiveFit, size) : null;
-  const frameRate = fps === "source" ? (first ? Math.round(first.fps * 1000) / 1000 : 30) : Number(fps);
+  const frameRate = fps === "source" ? sourceFps : Number(fps);
   const blocked = timeline.length === 0 || !out || !!settings.ffmpegError;
   const total = timeline.reduce((sum, i) => sum + outputDuration(i), 0);
+  const estimate = out ? out.w * out.h * frameRate * total * BITS_PER_PIXEL[quality] * (codec === "h264" ? 1.6 : 1) / 8 : 0;
+  const qualityInfo = QUALITIES.find((q) => q.id === quality)!;
+
+  // La vista previa: el cuadro actual en el formato de salida.
+  const previewRatio = ratio ?? 16 / 9;
+  useEffect(() => {
+    if (!open || !current || !videoRef.current) return;
+    let alive = true;
+    snapshot(videoRef.current, current, previewRatio).then((url) => alive && setPreview(url));
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, current?.id, current?.lut, current?.look, current?.lookStrength, previewRatio]);
 
   const run = async () => {
     if (!out) return;
@@ -1261,7 +1382,7 @@ function ExportSheet({
         output,
         codec,
         encoder,
-        quality,
+        quality: qualityInfo.crf,
         width: out.w,
         height: out.h,
         fps: frameRate,
@@ -1277,6 +1398,12 @@ function ExportSheet({
   };
 
   const percent = progress && progress.secondsTotal > 0 ? (progress.secondsDone / progress.secondsTotal) * 100 : 0;
+  const speedFactor = progress?.speed ? parseFloat(progress.speed) : NaN;
+  const remaining =
+    progress && speedFactor > 0 && progress.secondsDone > 0.5 ? (progress.secondsTotal - progress.secondsDone) / speedFactor : null;
+  const pano = !!current?.info.pano;
+  const cropPos = current && !pano ? `${current.cropX * 100}% ${current.cropY * 100}%` : "50% 50%";
+  const locked = exporting;
 
   return (
     <Sheet open={open} onClose={exporting ? () => {} : onClose} className="export-sheet" side="right" label="Exportar">
@@ -1285,7 +1412,6 @@ function ExportSheet({
           <h2>Exportar</h2>
           <p className="hint small">
             {timeline.length} {timeline.length === 1 ? "clip" : "clips"} · {formatDuration(total)}
-            {out && ` · ${out.w}×${out.h}`}
           </p>
         </div>
         <button className="round small" onClick={onClose} disabled={exporting} aria-label="Cerrar">
@@ -1294,18 +1420,62 @@ function ExportSheet({
       </header>
 
       <div className="export-fields">
-        <Field label="Formato">
+        <div className="export-preview">
+          <motion.div
+            className="export-frame"
+            layout
+            transition={spring}
+            style={{ aspectRatio: String(previewRatio), [previewRatio >= 1 ? "width" : "height"]: "100%" }}
+          >
+            {preview && (
+              <img
+                src={preview}
+                alt=""
+                draggable={false}
+                style={{ objectFit: pano ? "cover" : effectiveFit === "pad" ? "contain" : "cover", objectPosition: cropPos }}
+              />
+            )}
+          </motion.div>
+          {out && (
+            <span className="export-badge">
+              {out.w}×{out.h} · {Math.round(frameRate * 100) / 100} fps
+            </span>
+          )}
+        </div>
+
+        <Field label="¿Para dónde es?">
+          <div className="destinations">
+            {DESTINATIONS.map((d) => (
+              <button
+                key={d.id}
+                className={destination?.id === d.id ? "destination on" : "destination"}
+                onClick={() => applyDestination(d)}
+                disabled={locked}
+                aria-pressed={destination?.id === d.id}
+              >
+                <d.icon size={22} />
+                <strong>{d.label}</strong>
+                <span>{d.note}</span>
+              </button>
+            ))}
+          </div>
+        </Field>
+
+        <Field label="Formato" note={destination ? undefined : "Personalizado"}>
           <ChipGroup
             options={FORMATS.map((f) => ({ id: f.id, label: f.short }))}
             value={format}
-            onChange={(v) => setFormat(v as FrameFormat)}
+            onChange={(v) => {
+              setFormat(v as FrameFormat);
+              setSize(v === "source" ? "max" : "1080");
+            }}
             layoutId="export-format"
-            disabled={exporting}
+            disabled={locked}
           />
         </Field>
 
         {reframes && (
-          <Field label="Encuadre" note={fit === "crop" ? "Llena el cuadro; en cada clip eliges qué parte queda." : "Muestra la imagen completa con barras."}>
+          <Field label="Encuadre" note={fit === "crop" ? "Llena el cuadro; en el editor eliges qué parte queda." : "Se ve la imagen completa, con barras."}>
             <ChipGroup
               options={[
                 { id: "crop", label: "Recortar" },
@@ -1314,64 +1484,83 @@ function ExportSheet({
               value={fit}
               onChange={(v) => setFit(v as Fit)}
               layoutId="export-fit"
-              disabled={exporting}
+              disabled={locked}
             />
           </Field>
         )}
 
-        <Field label="Resolución" note={out ? `${out.w}×${out.h}` : undefined}>
-          <ChipGroup options={SIZES} value={size} onChange={setSize} layoutId="export-size" disabled={exporting} />
-        </Field>
-
-        <Field label="Archivo">
+        <Field label="Calidad" note={qualityInfo.note}>
           <ChipGroup
-            options={[
-              { id: "hevc", label: "H.265 10 bits" },
-              { id: "h264", label: "H.264 (más compatible)" },
-            ]}
-            value={codec}
-            onChange={(v) => setCodec(v as Codec)}
-            layoutId="export-codec"
-            disabled={exporting}
-          />
-        </Field>
-
-        <Field label="Codificar con">
-          <ChipGroup
-            options={[
-              ...(hardware && hardwareOk ? [{ id: hardware.encoder, label: `${hardwareName(hardware.encoder)} (rápido)` }] : []),
-              { id: "cpu", label: "Procesador (archivo más chico)" },
-            ]}
-            value={encoder}
-            onChange={(v) => setEncoder(v as Encoder)}
-            layoutId="export-encoder"
-            disabled={exporting}
-          />
-        </Field>
-
-        <Field label={`Calidad: ${quality}`} note="Menor número = mejor calidad y archivo más grande.">
-          <input
-            className="slider"
-            type="range"
-            min={14}
-            max={30}
+            options={QUALITIES.map((q) => ({ id: q.id, label: q.label }))}
             value={quality}
-            onChange={(e) => setQuality(Number(e.target.value))}
-            disabled={exporting}
-            style={{ ["--fill" as string]: `${((quality - 14) / 16) * 100}%` }}
+            onChange={(v) => setQuality(v as Quality)}
+            layoutId="export-quality"
+            disabled={locked}
           />
         </Field>
 
-        <Field label="Cuadros por segundo">
-          <select className="select" value={fps} onChange={(e) => setFps(e.target.value)} disabled={exporting}>
-            <option value="source">Igual que el primer clip{first ? ` (${Math.round(first.fps * 100) / 100})` : ""}</option>
-            {FRAME_RATES.map((r) => (
-              <option key={r} value={r}>
-                {r}
-              </option>
-            ))}
-          </select>
-        </Field>
+        <button className="export-more" onClick={() => setAdvanced(!advanced)} aria-expanded={advanced}>
+          <span>Más ajustes</span>
+          <span className="hint small">
+            {codec === "hevc" ? "H.265" : "H.264"} · {encoder === "cpu" ? "Procesador" : hardwareName(encoder)}
+          </span>
+          <motion.span animate={{ rotate: advanced ? 180 : 0 }} transition={{ duration: 0.2 }}>
+            <ChevronDownIcon size={18} />
+          </motion.span>
+        </button>
+
+        <AnimatePresence initial={false}>
+          {advanced && (
+            <motion.div
+              className="export-advanced"
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: "auto", opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.22 }}
+            >
+              <Field label="Resolución" note={out ? `${out.w}×${out.h}` : undefined}>
+                <ChipGroup options={SIZES} value={size} onChange={setSize} layoutId="export-size" disabled={locked} />
+              </Field>
+
+              <Field label="Archivo" note={codec === "hevc" ? "Mejor calidad por MB; algunos equipos viejos no lo abren." : "Se abre en cualquier lado."}>
+                <ChipGroup
+                  options={[
+                    { id: "hevc", label: "H.265 10 bits" },
+                    { id: "h264", label: "H.264" },
+                  ]}
+                  value={codec}
+                  onChange={(v) => setCodec(v as Codec)}
+                  layoutId="export-codec"
+                  disabled={locked}
+                />
+              </Field>
+
+              <Field label="Codificar con">
+                <ChipGroup
+                  options={[
+                    ...(hardware && hardwareOk ? [{ id: hardware.encoder, label: `${hardwareName(hardware.encoder)} (rápido)` }] : []),
+                    { id: "cpu", label: "Procesador (más lento, archivo más chico)" },
+                  ]}
+                  value={encoder}
+                  onChange={(v) => setEncoder(v as Encoder)}
+                  layoutId="export-encoder"
+                  disabled={locked}
+                />
+              </Field>
+
+              <Field label="Cuadros por segundo">
+                <select className="select" value={fps} onChange={(e) => setFps(e.target.value)} disabled={locked}>
+                  <option value="source">Igual que el primer clip ({Math.round(sourceFps * 100) / 100})</option>
+                  {FRAME_RATES.map((r) => (
+                    <option key={r} value={r}>
+                      {r}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {settings.ffmpegError && <p className="warning">{settings.ffmpegError}</p>}
       </div>
@@ -1382,7 +1571,9 @@ function ExportSheet({
             <motion.div key="progress" className="export-progress" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
               <div className="export-percent">
                 <strong>{Math.floor(percent)}%</strong>
-                <span className="hint small">{progress?.speed ? `velocidad ${progress.speed}` : "Iniciando…"}</span>
+                <span className="hint small">
+                  {remaining !== null ? `Quedan unos ${formatRemaining(remaining)}` : "Preparando…"}
+                </span>
               </div>
               <div className="bar">
                 <motion.div animate={{ width: `${percent}%` }} transition={{ ease: "easeOut", duration: 0.4 }} />
@@ -1405,9 +1596,12 @@ function ExportSheet({
               </button>
             </motion.div>
           ) : (
-            <motion.button key="go" className="pill primary large wide" onClick={run} disabled={blocked} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-              <DownloadIcon size={20} /> Exportar video
-            </motion.button>
+            <motion.div key="go" className="export-go" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+              <button className="pill primary large wide" onClick={run} disabled={blocked}>
+                <DownloadIcon size={20} /> Exportar video
+              </button>
+              {out && <span className="hint small">Archivo de unos {formatBytes(estimate)} · MP4</span>}
+            </motion.div>
           )}
         </AnimatePresence>
         {result && !exporting && (

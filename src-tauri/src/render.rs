@@ -36,6 +36,10 @@ pub struct TimelineItem {
     /// Estilo creativo que se aplica después de la conversión, igual de relativo.
     #[serde(default)]
     pub look: Option<String>,
+    /// Intensidad del estilo (0–1). La interfaz la manda con el ID; al
+    /// convertirlo en archivo ya queda aplicada (`luts::materialize_mix`).
+    #[serde(default = "one")]
+    pub look_strength: f64,
     pub has_audio: bool,
     /// 1 = normal, 0.25 = cuatro veces más lento, 4 = cuatro veces más rápido.
     #[serde(default = "one")]
@@ -551,6 +555,7 @@ mod tests {
             out_point: 3.5,
             lut: lut.then(|| "luts/dlog-m.cube".into()),
             look: None,
+            look_strength: 1.0,
             has_audio,
             speed: 1.0,
             volume: 1.0,
