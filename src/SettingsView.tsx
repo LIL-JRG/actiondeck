@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { api, errorText, hardwareName, type Lut, type LutPack, type Settings } from "./api";
-import { shortLutName } from "./EditView";
+import { shortLutName } from "./LookGallery";
 import { CheckIcon, ChipIcon, DownloadIcon, ExternalIcon, FolderIcon, LogIcon, PaletteIcon, PlusIcon, TrashIcon } from "./icons";
 
 const DJI_DOWNLOADS = "https://www.dji.com/downloads";
@@ -42,8 +42,10 @@ export function SettingsView({ settings, onChange, luts, onLutsChange, onError }
     setDownloading(null);
   };
 
-  const official = luts.filter((l) => l.builtin);
-  const extras = luts.filter((l) => !l.builtin);
+  const official = luts.filter((l) => l.kind === "conversion");
+  const gallery = luts.filter((l) => l.kind === "look");
+  const galleryGroups = [...new Set(gallery.map((l) => l.category))].join(", ");
+  const extras = luts.filter((l) => l.kind === "extra");
 
   const apply = async (action: () => Promise<Settings>) => {
     try {
@@ -89,9 +91,12 @@ export function SettingsView({ settings, onChange, luts, onLutsChange, onError }
 
         <Group
           icon={<PaletteIcon size={24} />}
-          title="Filtros (LUT extra)"
-          text="Estilos que se aplican encima del color recuperado. Descarga los de DJI o importa cualquier LUT .cube."
+          title="Filtros"
+          text="Estilos que se aplican encima del color recuperado, con la intensidad que elijas. La galería ya viene en la app; también puedes descargar los de DJI o importar cualquier LUT .cube."
         >
+          <SettingRow label="Galería" value={`${gallery.length} estilos: ${galleryGroups}`}>
+            <span className="tag">Incluida</span>
+          </SettingRow>
           {packs.map((p) => (
             <SettingRow key={p.id} label={`Estilos de DJI para ${p.name}`} value={p.installed ? "Descargados" : "Del sitio de DJI"}>
               {p.installed ? (

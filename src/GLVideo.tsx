@@ -7,6 +7,8 @@ type Props = {
   /** IDs de la LUT de conversión y del filtro; null = sin ellos. */
   lut: string | null;
   look: string | null;
+  /** Intensidad del filtro (0–1). */
+  lookAmount?: number;
   /** Video 360: la vista. Con `onView`, se cambia arrastrando y con la rueda. */
   view?: View360 | null;
   onView?: (view: View360) => void;
@@ -31,13 +33,15 @@ function useLuts(lut: string | null, look: string | null): [Lut3D | null, Lut3D 
  * si es 360, desde la vista elegida. El `<video>` sigue debajo (da el sonido
  * y los cuadros); si WebGL no está disponible, se ve él directamente.
  */
-export function GLVideo({ src, videoRef, lut, look, view, onView, videoProps, children, className = "" }: Props) {
+export function GLVideo({ src, videoRef, lut, look, lookAmount = 1, view, onView, videoProps, children, className = "" }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   // El video propio; `videoRef` es el que comparte con quien lo controla.
   const own = useRef<HTMLVideoElement | null>(null);
   const boxRef = useRef<HTMLDivElement>(null);
   const renderer = useRef<VideoRenderer | null>(null);
-  const [failed, setFailed] = useState(!VideoRenderer.supported());
+  const [failed, setFailed] = useState(() => !VideoRenderer.supported());
+  // Sube si el navegador le quitó el contexto al lienzo y lo devolvió.
+  const [generation, setGeneration] = useState(0);
   const [lutData, lookData] = useLuts(lut, look);
   const needsGl = !!view || !!lut || !!look;
   const active = needsGl && !failed;
@@ -59,28 +63,43 @@ export function GLVideo({ src, videoRef, lut, look, view, onView, videoProps, ch
   );
   const viewRef = useRef(view ?? null);
   viewRef.current = view ?? null;
+  const amountRef = useRef(lookAmount);
+  amountRef.current = lookAmount;
 
   const draw = () => {
     const r = renderer.current;
     const v = own.current;
     if (!r || !v || v.readyState < 2) return;
     r.view = viewRef.current;
+    r.lookAmount = amountRef.current;
     if (!r.draw(v) && v.videoWidth) setFailed(true);
   };
 
   useLayoutEffect(() => {
-    if (!active || !canvasRef.current) return;
+    const canvas = canvasRef.current;
+    if (!active || !canvas) return;
     try {
-      renderer.current = new VideoRenderer(canvasRef.current);
+      renderer.current = new VideoRenderer(canvas);
     } catch {
       setFailed(true);
       return;
     }
+    // Si el navegador suelta el contexto (demasiados abiertos, la GPU se
+    // reinició…), se pide que lo devuelva y se rehace el renderizador.
+    const lost = (e: Event) => {
+      e.preventDefault();
+      renderer.current = null;
+    };
+    const restored = () => setGeneration((g) => g + 1);
+    canvas.addEventListener("webglcontextlost", lost);
+    canvas.addEventListener("webglcontextrestored", restored);
     return () => {
+      canvas.removeEventListener("webglcontextlost", lost);
+      canvas.removeEventListener("webglcontextrestored", restored);
       renderer.current?.dispose();
       renderer.current = null;
     };
-  }, [active]);
+  }, [active, generation]);
 
   // El lienzo a la resolución real de la pantalla.
   useLayoutEffect(() => {
@@ -103,9 +122,9 @@ export function GLVideo({ src, videoRef, lut, look, view, onView, videoProps, ch
     renderer.current?.setLut(1, lookData);
     draw();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lutData, lookData, active]);
+  }, [lutData, lookData, active, generation]);
 
-  useEffect(draw, [view]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(draw, [view, lookAmount]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Un cuadro nuevo en cada cuadro del video (o en cada pantalla, si el
   // navegador no avisa por cuadro).
@@ -132,7 +151,7 @@ export function GLVideo({ src, videoRef, lut, look, view, onView, videoProps, ch
       v.removeEventListener("seeked", once);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, src]);
+  }, [active, src, generation]);
 
   // 360: arrastrar mira alrededor (como mover la cámara) y la rueda acerca.
   const drag = useRef<{ x: number; y: number; view: View360; moved: boolean } | null>(null);

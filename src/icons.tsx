@@ -279,3 +279,24 @@ export const SphereIcon = (p: IconProps) => (
     <path d="M12 3.5c2.4 2.3 3.5 5.1 3.5 8.5s-1.1 6.2-3.5 8.5c-2.4-2.3-3.5-5.1-3.5-8.5s1.1-6.2 3.5-8.5z" />
   </Icon>
 );
+
+export const PhoneIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <rect x="7" y="3" width="10" height="18" rx="2.2" />
+    <path d="M11 18h2" />
+  </Icon>
+);
+
+export const FeedIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <rect x="5" y="3.5" width="14" height="17" rx="2" />
+    <path d="m5.3 16 4.2-4.2 3 3 2-2 4.2 4.2" />
+  </Icon>
+);
+
+export const WideIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <rect x="2.5" y="6" width="19" height="12" rx="2.5" />
+    <path d="m10.3 9.5 4.2 2.5-4.2 2.5z" fill="currentColor" stroke="none" />
+  </Icon>
+);

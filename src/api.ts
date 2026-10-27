@@ -53,7 +53,10 @@ export const COLOR_MODE_NAMES: Record<ColorMode, string> = {
 };
 
 /** Una LUT: las oficiales de DJI vienen con la app; las extra las agrega el usuario. */
-export type Lut = { id: string; name: string; detail: string; builtin: boolean };
+/** `conversion`: oficial de DJI (LOG a Rec.709); `look`: de la galería; `extra`: del usuario. */
+export type LutKind = "conversion" | "look" | "extra";
+
+export type Lut = { id: string; name: string; detail: string; kind: LutKind; category: string | null };
 
 /** Paquete de estilos creativos de DJI para descargar. */
 export type LutPack = { id: string; name: string; installed: boolean };
@@ -99,8 +102,10 @@ export type TimelineItem = {
   outPoint: number;
   /** LUT que convierte el perfil de la cámara a Rec.709 (ID de `Lut`), o null. */
   lut: string | null;
-  /** Estilo creativo que se aplica después (una LUT extra), o null. */
+  /** Estilo creativo que se aplica después (de la galería o extra), o null. */
   look: string | null;
+  /** Intensidad del filtro: 0 = sin él, 1 = completo. */
+  lookStrength: number;
   hasAudio: boolean;
   /** 1 = normal, 0.25 = cuatro veces más lento. */
   speed: number;
@@ -161,19 +166,20 @@ export const api = {
   startImport: (paths: string[]) => invoke<ImportSummary>("start_import", { paths }),
   cancelImport: () => invoke<void>("cancel_import"),
   thumbnail: (path: string) => invoke<string>("thumbnail", { path }),
-  compareFrames: (path: string, at: number, lut: string | null, look: string | null, view: View360 | null) =>
-    invoke<{ before: string; after: string | null }>("compare_frames", { path, at, lut, look, view }),
+  compareFrames: (path: string, at: number, lut: string | null, look: string | null, lookStrength: number, view: View360 | null) =>
+    invoke<{ before: string; after: string | null }>("compare_frames", { path, at, lut, look, lookStrength, view }),
   /** El texto `.cube` de una LUT, para aplicarla en la GPU. */
   lutFile: (id: string) => invoke<ArrayBuffer>("lut_file", { id }),
   previewSource: (path: string, forceProxy = false) => invoke<string>("preview_source", { path, forceProxy }),
   startExport: (items: TimelineItem[], settings: ExportSettings) =>
     invoke<string>("start_export", {
-      items: items.map(({ path, inPoint, outPoint, lut, look, hasAudio, speed, volume, cropX, cropY, view }) => ({
+      items: items.map(({ path, inPoint, outPoint, lut, look, lookStrength, hasAudio, speed, volume, cropX, cropY, view }) => ({
         path,
         inPoint,
         outPoint,
         lut,
         look,
+        lookStrength,
         hasAudio,
         speed,
         volume,

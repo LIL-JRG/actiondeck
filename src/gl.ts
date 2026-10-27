@@ -37,6 +37,7 @@ uniform sampler3D u_lut;
 uniform sampler3D u_look;
 uniform float u_lutSize;
 uniform float u_lookSize;
+uniform float u_lookAmount;  // intensidad del filtro (0–1)
 uniform int u_mode;          // 0 plano, 1 360 rectilíneo, 2 pequeño planeta
 uniform mat3 u_rot;
 uniform vec2 u_tan;          // tangente de medio campo de visión (h, v)
@@ -88,7 +89,7 @@ void main() {
     c = sphere(u_rot * ray);
   }
   if (u_lutSize > 0.0) c = lut(u_lut, u_lutSize, c);
-  if (u_lookSize > 0.0) c = lut(u_look, u_lookSize, c);
+  if (u_lookSize > 0.0) c = mix(c, lut(u_look, u_lookSize, c), u_lookAmount);
   outColor = vec4(c, 1.0);
 }`;
 
@@ -132,6 +133,8 @@ function multiply(a: number[], b: number[]): number[] {
   return out;
 }
 
+let webgl2: boolean | null = null;
+
 export class VideoRenderer {
   private gl: WebGL2RenderingContext;
   private program: WebGLProgram;
@@ -141,15 +144,27 @@ export class VideoRenderer {
   private loaded: [Lut3D | null, Lut3D | null] = [null, null];
   private uniforms: Record<string, WebGLUniformLocation | null> = {};
   view: View360 | null = null;
+  /** Intensidad del filtro: 0 = sin él, 1 = completo. */
+  lookAmount = 1;
   /** Cómo cabe un video normal en el lienzo, como `object-fit`. */
   fit: "contain" | "cover" = "contain";
 
+  /**
+   * Si hay WebGL2. Se averigua una sola vez y se suelta el contexto de
+   * prueba: el navegador admite pocos (unos 16) y, al pasarse, le quita el
+   * suyo al más viejo, que suele ser el del video que se está viendo.
+   */
   static supported(): boolean {
-    try {
-      return !!document.createElement("canvas").getContext("webgl2");
-    } catch {
-      return false;
+    if (webgl2 === null) {
+      try {
+        const gl = document.createElement("canvas").getContext("webgl2");
+        webgl2 = !!gl;
+        gl?.getExtension("WEBGL_lose_context")?.loseContext();
+      } catch {
+        webgl2 = false;
+      }
     }
+    return webgl2;
   }
 
   constructor(readonly canvas: HTMLCanvasElement) {
@@ -158,7 +173,7 @@ export class VideoRenderer {
     this.gl = gl;
     this.program = link(gl, VERTEX, FRAGMENT);
     gl.useProgram(this.program);
-    for (const name of ["u_video", "u_lut", "u_look", "u_lutSize", "u_lookSize", "u_mode", "u_rot", "u_tan", "u_lensHalf"]) {
+    for (const name of ["u_video", "u_lut", "u_look", "u_lutSize", "u_lookSize", "u_lookAmount", "u_mode", "u_rot", "u_tan", "u_lensHalf"]) {
       this.uniforms[name] = gl.getUniformLocation(this.program, name);
     }
     const buffer = gl.createBuffer();
@@ -241,6 +256,7 @@ export class VideoRenderer {
     }
     gl.uniform1f(this.uniforms.u_lutSize, this.sizes[0]);
     gl.uniform1f(this.uniforms.u_lookSize, this.sizes[1]);
+    gl.uniform1f(this.uniforms.u_lookAmount, Math.min(1, Math.max(0, this.lookAmount)));
     gl.uniform1i(this.uniforms.u_mode, !view ? 0 : view.mode === "planet" ? 2 : 1);
     if (view) {
       const aspect = width / height;
